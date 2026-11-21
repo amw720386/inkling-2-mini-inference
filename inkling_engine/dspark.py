@@ -92,16 +92,21 @@ class Drafter:
         # FP8 copies for the drafter's big GEMVs (base logits over the vocab, layer projections)
         self.head8 = Fp8Weight(self.head)
         for L in self.layers:
-            L["qkv"], L["gate_up"] = Fp8Weight(L["qkv"]), Fp8Weight(L["gate_up"])
+            for k in ("qkv", "gate_up", "wo", "w_down"):
+                L[k] = Fp8Weight(L[k])
         mh = "markov_head."
         self.w1 = t[mh + "markov_w1.weight"]
         self.rnn_w, self.rnn_b = t[mh + "rnn_proj.weight"], t[mh + "rnn_proj.bias"]
+        # step-dependent columns [state, W1[prev]] vs step-independent [h_i, f_rnn] (precomputed per round)
+        self.rnn_w_step = self.rnn_w[:, :2 * RANK].contiguous()
+        self.rnn_w_rest = self.rnn_w[:, 2 * RANK:].contiguous()
         self.f_norm = t[mh + "dflare_norm.weight"]
         D, V = self.embed.shape[1], self.head.shape[0]
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=device)  # noqa: E731
         self.qkv_out = z(BLOCK, self.layers[0]["qkv"].shape[0], dt=torch.bfloat16)
         self.gu_out = z(BLOCK, self.layers[0]["gate_up"].shape[0], dt=torch.bfloat16)
         self.base_out = z(GAMMA, V, dt=torch.bfloat16)
+        self.h_out = z(BLOCK, D, dt=torch.bfloat16)
         self.draft_logits = torch.full((GAMMA, V), float("-inf"), device=device)
         self.ctx = min(max_ctx, DRAFT_CTX)
         kv = dict(dtype=torch.bfloat16, device=device)
@@ -181,8 +186,8 @@ class Drafter:
         o = F.scaled_dot_product_attention(q.transpose(0, 1)[None], keys.transpose(0, 1)[None],
                                            vals.transpose(0, 1)[None], attn_mask=valid[None, None, None, :],
                                            enable_gqa=True)
-        o = o[0].transpose(0, 1).reshape(n, HEADS * HEAD_DIM)
-        return bf(bf(o) @ L["wo"].T)
+        o = bf(o[0].transpose(0, 1).reshape(n, HEADS * HEAD_DIM)).contiguous()
+        return dense_mm(o, L["wo"], self.h_out)
 
     @torch.inference_mode()
     def _draft(self):
@@ -198,7 +203,7 @@ class Drafter:
             xn = bf(rms(res, L["post_norm"]))
             gu = dense_mm(xn, L["gate_up"], self.gu_out)
             gate, up = gu.chunk(2, dim=-1)
-            m = bf(bf(F.silu(gate.float()) * up.float()) @ L["w_down"].T)
+            m = dense_mm(bf(F.silu(gate.float()) * up.float()).contiguous(), L["w_down"], self.h_out)
             res = bf(res.float() + m.float())
             nxt = self.layers[l + 1]["in_norm"] if l < 2 else self.final_norm
             xn = bf(rms(res, nxt))
@@ -209,9 +214,10 @@ class Drafter:
         state = torch.zeros(RANK, dtype=torch.bfloat16, device=dev)
         prev = self.anchor
         tokens, all_logits = [], []
+        rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest.float().T  # [7, 768]
         for i in range(GAMMA):
-            z = torch.cat([state, self.w1[prev][0], h[i], self.f_rnn])
-            raw = bf(z @ self.rnn_w.T + self.rnn_b).float()
+            z = torch.cat([state, self.w1[prev][0]])
+            raw = bf(z.float() @ self.rnn_w_step.float().T + rest[i] + self.rnn_b.float()).float()
             gate = bf(torch.sigmoid(raw[:RANK]))
             cell = bf(torch.tanh(raw[RANK:2 * RANK]))
             state = bf(bf(gate.float() * state.float()).float() + bf(bf(1 - gate.float()).float() * cell.float()).float())
