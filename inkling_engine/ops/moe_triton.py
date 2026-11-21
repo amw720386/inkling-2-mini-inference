@@ -63,6 +63,60 @@ def _swiglu_pairs_2d(acc, BM: tl.constexpr, BN: tl.constexpr, GATE_CAP: tl.const
     return _swiglu(g, u, GATE_CAP, UP_CAP)
 
 
+@triton.jit
+def _e2m1x8_to_f16(words):
+    """int32 words holding 8 E2M1 codes (byte b = elements 2b, 2b+1; low nibble first) ->
+    four f16x2-packed int32 tensors via the hardware cvt (sm_100+/sm_120)."""
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b8 b0, b1, b2, b3;
+        mov.b32 {b0, b1, b2, b3}, $4;
+        cvt.rn.f16x2.e2m1x2 $0, b0;
+        cvt.rn.f16x2.e2m1x2 $1, b1;
+        cvt.rn.f16x2.e2m1x2 $2, b2;
+        cvt.rn.f16x2.e2m1x2 $3, b3;
+        }
+        """,
+        constraints="=r,=r,=r,=r,r",
+        args=[words],
+        dtype=(tl.int32, tl.int32, tl.int32, tl.int32),
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def _f16x2_lo(v):
+    return (v & 0xFFFF).to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32)
+
+
+@triton.jit
+def _f16x2_hi(v):
+    return (v >> 16).to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32)
+
+
+@triton.jit
+def _nvfp4_dot_words(W32, w_base, n, nmask, KW: tl.constexpr, k0, x_ptr, BN: tl.constexpr, BK: tl.constexpr):
+    """Partial dot of BN weight rows with x over [k0, k0 + BK): products summed per 16-element scale
+    block -> [BN, BK // 16]. W32: weights as int32 words [rows, KW]."""
+    NW: tl.constexpr = BK // 8
+    j = tl.arange(0, NW)
+    wv = tl.load(W32 + w_base + n[:, None] * KW + (k0 // 8 + j)[None, :], mask=nmask[:, None], other=0,
+                 eviction_policy="evict_first")
+    c0, c1, c2, c3 = _e2m1x8_to_f16(wv)
+    xb = x_ptr + k0 + 8 * j
+    acc = _f16x2_lo(c0) * tl.load(xb).to(tl.float32)[None, :]
+    acc += _f16x2_hi(c0) * tl.load(xb + 1).to(tl.float32)[None, :]
+    acc += _f16x2_lo(c1) * tl.load(xb + 2).to(tl.float32)[None, :]
+    acc += _f16x2_hi(c1) * tl.load(xb + 3).to(tl.float32)[None, :]
+    acc += _f16x2_lo(c2) * tl.load(xb + 4).to(tl.float32)[None, :]
+    acc += _f16x2_hi(c2) * tl.load(xb + 5).to(tl.float32)[None, :]
+    acc += _f16x2_lo(c3) * tl.load(xb + 6).to(tl.float32)[None, :]
+    acc += _f16x2_hi(c3) * tl.load(xb + 7).to(tl.float32)[None, :]
+    return tl.sum(tl.reshape(acc, (BN, BK // 16, 2)), axis=2)
+
+
 # --------------------------------------------------------------------------- decode
 _GEMV_CONFIGS = [
     triton.Config({"BN": bn, "BK": bk}, num_warps=nw, num_stages=ns)
@@ -78,10 +132,10 @@ def _prune(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-@triton.autotune(configs=_GEMV_CONFIGS, key=["N", "K", "FMT", "ACT"], restore_value=["Out"],
+@triton.autotune(configs=_GEMV_CONFIGS, key=["N", "K", "FMT", "ACT", "HW_FP4"], restore_value=["Out"],
                  prune_configs_by={"early_config_prune": _prune})
 @triton.jit
-def _gemv_kernel(
+def _moe_gemv_kernel(
     X, x_row_div, x_stride,  # activations: row of pair r is r // x_row_div
     W, S, F, Ids,  # expert weights, scales, nvfp4 factor, expert id per pair
     Out, out_stride, Wts,
@@ -89,7 +143,7 @@ def _gemv_kernel(
     FMT: tl.constexpr,  # 0 nvfp4, 1 mxfp8
     ACT: tl.constexpr,  # 1: fused swiglu (w13), 0: scale by routing weight (w2)
     GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
-    BN: tl.constexpr, BK: tl.constexpr,
+    BN: tl.constexpr, BK: tl.constexpr, HW_FP4: tl.constexpr = True,
 ):
     tl.static_assert(K % BK == 0)
     r = tl.program_id(0)
@@ -105,14 +159,20 @@ def _gemv_kernel(
         w_base = W + e * N * KB
         s_base = S + e * N * KS
         for k0 in tl.range(0, K, BK):
-            j = tl.arange(0, BK // 2)
-            xe = tl.load(x_ptr + k0 + 2 * j).to(tl.float32)
-            xo = tl.load(x_ptr + k0 + 2 * j + 1).to(tl.float32)
-            wb = tl.load(w_base + n[:, None] * KB + (k0 // 2 + j)[None, :], mask=nmask[:, None], other=0).to(tl.int32)
-            p = _e2m1_to_f32(wb & 15) * xe[None, :] + _e2m1_to_f32(wb >> 4) * xo[None, :]
-            p = tl.sum(tl.reshape(p, (BN, BK // 16, 8)), axis=2)
             js = tl.arange(0, BK // 16)
-            sc = tl.load(s_base + n[:, None] * KS + (k0 // 16 + js)[None, :], mask=nmask[:, None], other=0.0)
+            sc = tl.load(s_base + n[:, None] * KS + (k0 // 16 + js)[None, :], mask=nmask[:, None], other=0.0,
+                         eviction_policy="evict_first")
+            if HW_FP4:
+                p = _nvfp4_dot_words(W.to(tl.pointer_type(tl.int32), bitcast=True), e * N * (K // 8), n, nmask,
+                                     K // 8, k0, x_ptr, BN, BK)
+            else:
+                j = tl.arange(0, BK // 2)
+                xe = tl.load(x_ptr + k0 + 2 * j).to(tl.float32)
+                xo = tl.load(x_ptr + k0 + 2 * j + 1).to(tl.float32)
+                wb = tl.load(w_base + n[:, None] * KB + (k0 // 2 + j)[None, :], mask=nmask[:, None], other=0,
+                             eviction_policy="evict_first").to(tl.int32)
+                p = _e2m1_to_f32(wb & 15) * xe[None, :] + _e2m1_to_f32(wb >> 4) * xo[None, :]
+                p = tl.sum(tl.reshape(p, (BN, BK // 16, 8)), axis=2)
             acc += tl.sum(p * sc.to(tl.float32), axis=1)
         acc = acc * tl.load(F + e)
     else:
@@ -122,7 +182,8 @@ def _gemv_kernel(
         for k0 in tl.range(0, K, BK):
             j = tl.arange(0, BK)
             xv = tl.load(x_ptr + k0 + j).to(tl.float32)
-            wv = tl.load(w_base + n[:, None] * K + (k0 + j)[None, :], mask=nmask[:, None], other=0.0).to(tl.float32)
+            wv = tl.load(w_base + n[:, None] * K + (k0 + j)[None, :], mask=nmask[:, None], other=0.0,
+                         eviction_policy="evict_first").to(tl.float32)
             p = tl.sum(tl.reshape(wv * xv[None, :], (BN, BK // 32, 32)), axis=2)
             js = tl.arange(0, BK // 32)
             sc = tl.load(s_base + n[:, None] * KS2 + (k0 // 32 + js)[None, :], mask=nmask[:, None], other=127)
@@ -146,7 +207,7 @@ def _scale_view(w: ExpertWeight):
 
 def moe_decode(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: ExpertWeight, w2: ExpertWeight,
                gate_cap: float, up_cap: float, act_buf: torch.Tensor | None = None,
-               rows_buf: torch.Tensor | None = None) -> torch.Tensor:
+               rows_buf: torch.Tensor | None = None, hw_fp4: bool = True) -> torch.Tensor:
     """x [T, H] bf16; ids/wts [T, k]. Returns fp32 rows [T*k, H] (weighted, not summed)."""
     t, hdim = x.shape
     k = ids.shape[1]
@@ -159,13 +220,13 @@ def moe_decode(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Exper
     rows = rows_buf if rows_buf is not None else torch.empty(pairs, hdim, dtype=torch.float32, device=x.device)
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_f
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_f
-    _gemv_kernel[lambda m: (pairs, triton.cdiv(n13, m["BN"]))](
+    _moe_gemv_kernel[lambda m: (pairs, triton.cdiv(n13, m["BN"]))](
         x, k, x.stride(0), w13.weight, _scale_view(w13), f13, ids_f, act, act.stride(0), wts_f,
-        n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap,
+        n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, HW_FP4=hw_fp4,
     )
-    _gemv_kernel[lambda m: (pairs, triton.cdiv(hdim, m["BN"]))](
+    _moe_gemv_kernel[lambda m: (pairs, triton.cdiv(hdim, m["BN"]))](
         act, 1, act.stride(0), w2.weight, _scale_view(w2), f2, ids_f, rows, rows.stride(0), wts_f,
-        hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap,
+        hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap, HW_FP4=hw_fp4,
     )
     return rows
 
@@ -266,3 +327,68 @@ def moe_prefill(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Expe
     out = torch.zeros(t * k, hdim, dtype=torch.float32, device=x.device)
     out[order] = rows
     return out.view(t, k, hdim).sum(1).to(torch.bfloat16)
+
+
+# ------------------------------------------------------------- grouped small-M path
+# Verify / small-batch decode: one tile per expert (an expert gets at most T <= 16 rows), so each hit
+# expert's weights are read once for all its tokens. Tile bounds come from device tensors only, so the
+# whole path is CUDA-graph capturable; programs of experts without rows exit at once.
+_GROUPED_CONFIGS = [
+    triton.Config({"BN": bn, "BK": bk}, num_warps=nw, num_stages=ns)
+    for bn in (32, 64, 128)
+    for bk in (64, 128, 256)
+    for nw in (4, 8)
+    for ns in (2, 3)
+]
+
+
+def _prune_grouped(configs, named_args, **kw):
+    k = named_args["K"]
+    return [c for c in configs if k % c.kwargs["BK"] == 0]
+
+
+_grouped_tuned = triton.autotune(configs=_GROUPED_CONFIGS, key=["N", "K", "FMT", "ACT"],
+                                 prune_configs_by={"early_config_prune": _prune_grouped})(_grouped_kernel)
+
+
+class GroupedScratch:
+    def __init__(self, max_tokens: int, top_k: int, n_experts: int, hidden: int, inter: int, device="cuda"):
+        p = max_tokens * top_k
+        self.ones = torch.ones(p, dtype=torch.int32, device=device)
+        self.counts = torch.zeros(n_experts, dtype=torch.int32, device=device)
+        self.tile_expert = torch.arange(n_experts, dtype=torch.int32, device=device)
+        self.act = torch.empty(p, inter, dtype=torch.bfloat16, device=device)
+        self.rows_sorted = torch.empty(p, hidden, dtype=torch.float32, device=device)
+        self.ident = torch.arange(p, dtype=torch.int32, device=device)
+
+
+def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap, up_cap, sc: GroupedScratch,
+                      rows_out: torch.Tensor) -> torch.Tensor:
+    """x [T, H] bf16 (T <= 16), ids [T, k] int32, wts [T, k] fp32. Writes per-pair weighted rows
+    rows_out [T*k, H] fp32 (pair order, like moe_decode) and returns it."""
+    t, hdim = x.shape
+    k = ids.shape[1]
+    p = t * k
+    e, n13, _ = w13.shape
+    flat = ids.reshape(-1).long()
+    order = torch.argsort(flat, stable=True)
+    sc.counts.zero_()
+    sc.counts.index_add_(0, flat, sc.ones[:p])
+    ends = torch.cumsum(sc.counts, 0, dtype=torch.int32)
+    starts = ends - sc.counts
+    row_src = order.to(torch.int32)
+    wts_sorted = wts.reshape(-1).float()[order].contiguous()
+    f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_sorted
+    f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_sorted
+    act = sc.act[:p]
+    rs = sc.rows_sorted[:p]
+    _grouped_tuned[lambda m: (e, triton.cdiv(n13, m["BN"]))](
+        x, x.stride(0), row_src, k, w13.weight, _scale_view(w13), f13, sc.tile_expert, starts, ends,
+        act, act.stride(0), wts_sorted, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=16,
+    )
+    _grouped_tuned[lambda m: (e, triton.cdiv(hdim, m["BN"]))](
+        act, act.stride(0), sc.ident, 1, w2.weight, _scale_view(w2), f2, sc.tile_expert, starts, ends,
+        rs, rs.stride(0), wts_sorted, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=16,
+    )
+    rows_out[:p].index_copy_(0, order, rs)
+    return rows_out[:p]

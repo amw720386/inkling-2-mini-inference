@@ -45,6 +45,7 @@ for it in items[:6]:
 
 for k, (n, s) in tot.items():
     print(f"overall {k}: {n / s:.1f} tok/s")
+print("round costs (ms):", {m: round(c, 2) for m, c in eng.costs.items()})
 
 # long-context decode (8k prompt of natural-ish text repeated)
 long_ids = (items[0]["input_ids"] * 200)[:8000]

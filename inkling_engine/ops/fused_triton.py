@@ -163,6 +163,7 @@ def _qkv_post_kernel(
 ):
     t = tl.program_id(0).to(tl.int64)
     kvh = tl.program_id(1)
+    part = tl.program_id(2)  # 0..GRP-1: one q/rel head of the group; GRP: the K/V convs
     GRP: tl.constexpr = H // KVH
     sq = tl.load(TokSeq + t)
     slot = tl.load(SeqSlot + sq).to(tl.int64)
@@ -171,10 +172,10 @@ def _qkv_post_kernel(
     pos = tl.load(Pos + t)
     tau = 1.0 + log_alpha * tl.log(tl.maximum((pos + 1).to(tl.float32) / log_floor, 1.0))
 
-    # q heads of this group --------------------------------------------------
+    # one q head of this group (part < GRP) ---------------------------------------
     d = tl.arange(0, D)
-    for gh in tl.static_range(GRP):
-        hh = kvh * GRP + gh
+    if part < GRP:
+        hh = kvh * GRP + part
         x = tl.load(QP + t * q_stride + hh * D + d).to(tl.float32) * tl.load(Qs + hh * D + d).to(tl.float32)
         x = _l2clip_vec(x, qk_thr).to(tl.bfloat16)
         if GLOBAL:
@@ -191,6 +192,8 @@ def _qkv_post_kernel(
         logits = tl.sum(r.to(tl.float32)[:, None] * pt, axis=0)
         tl.store(ROut + (t * H + hh) * RE + e, logits.to(tl.bfloat16))
 
+    if part < GRP:
+        return
     # k / v: short conv over this head's channels ------------------------------
     KVD: tl.constexpr = KVH * D
     ch = kvh * D + d
@@ -227,7 +230,7 @@ def qkv_post(qp, r_col, k_lin, v_lin, dyn_kv, lw, kstate, vstate, q_out, r_out, 
     kvh, d = cfg.num_kv_heads, cfg.head_dim
     assert k_lin.stride(0) == v_lin.stride(0)
     kc, vc = cache_kv if cache_kv is not None else (k_out, k_out)
-    _qkv_post_kernel[(t, kvh)](
+    _qkv_post_kernel[(t, kvh, cfg.num_heads // kvh + 1)](
         qp, qp.stride(0), k_lin, v_lin, k_lin.stride(0),
         dyn_kv[0] if dyn_kv is not None else qp, dyn_kv[1] if dyn_kv is not None else qp,
         dyn_kv[0].stride(0) if dyn_kv is not None else 0,
@@ -297,46 +300,55 @@ def post_attn(o, conv_w, state, blk, ns, part_slot, resid, query, norm_w, out, m
 
 # --------------------------------------------------------------------------- router
 @triton.jit
-def _router_kernel(X, x_stride, W, Logits, H: tl.constexpr, E: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr):
+def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
+                        H: tl.constexpr, BH: tl.constexpr, E: tl.constexpr, BE: tl.constexpr, TOPK: tl.constexpr):
+    """Each program computes BE expert logits of one token with one load of its weight rows; the program
+    that finishes last for the token (atomic counter) selects the top-k and resets the counter."""
     t = tl.program_id(0).to(tl.int64)
     pe = tl.program_id(1)
+    h = tl.arange(0, BH)
+    hm = h < H
     e = pe * BE + tl.arange(0, BE)
-    acc = tl.zeros((BE,), tl.float32)
-    for k0 in tl.range(0, H, BK):
-        k = k0 + tl.arange(0, BK)
-        km = k < H
-        x = tl.load(X + t * x_stride + k, mask=km, other=0.0).to(tl.float32)
-        w = tl.load(W + e[:, None] * H + k[None, :], mask=km[None, :], other=0.0).to(tl.float32)
-        acc += tl.sum(w * x[None, :], 1)
-    tl.store(Logits + t * E + e, acc)
+    x = tl.load(X + t * x_stride + h, mask=hm, other=0.0).to(tl.float32)
+    w = tl.load(W + e[:, None] * H + h[None, :], mask=hm[None, :], other=0.0, eviction_policy="evict_last")
+    tl.store(Logits + t * E + e, tl.sum(w.to(tl.float32) * x[None, :], 1))
+    NPROG: tl.constexpr = E // BE
+    done = tl.atomic_add(Counter + t, 1, sem="acq_rel")
+    if done == NPROG - 1:
+        ea = tl.arange(0, E)
+        lg = tl.load(Logits + t * E + ea, volatile=True)
+        sg = tl.sigmoid(lg)
+        sel = sg + tl.load(Bias + ea)
+        ks = tl.arange(0, TOPK)
+        ids = tl.zeros((TOPK,), tl.int32)
+        ws = tl.zeros((TOPK,), tl.float32)
+        for j in tl.static_range(TOPK):
+            mx = tl.max(sel, 0)
+            idx = tl.min(tl.where(sel == mx, ea, E), 0)
+            wj = tl.sum(tl.where(ea == idx, sg, 0.0), 0)
+            ids = tl.where(ks == j, idx, ids)
+            ws = tl.where(ks == j, wj, ws)
+            sel = tl.where(ea == idx, float("-inf"), sel)
+        ws = ws / (tl.sum(ws, 0) + 1e-20) * scale
+        tl.store(Ids + t * TOPK + ks, ids)
+        tl.store(Wts + t * TOPK + ks, ws)
+        tl.atomic_xchg(Counter + t, 0)
 
 
-@triton.jit
-def _topk_kernel(Logits, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.constexpr, scale):
-    t = tl.program_id(0).to(tl.int64)
-    e = tl.arange(0, E)
-    s = tl.sigmoid(tl.load(Logits + t * E + e))
-    sel = s + tl.load(Bias + e)
-    ws = tl.zeros((TOPK,), tl.float32)
-    ks = tl.arange(0, TOPK)
-    ids = tl.zeros((TOPK,), tl.int32)
-    for j in tl.static_range(TOPK):
-        mx = tl.max(sel, 0)
-        idx = tl.min(tl.where(sel == mx, e, E), 0)
-        wj = tl.sum(tl.where(e == idx, s, 0.0), 0)
-        ids = tl.where(ks == j, idx, ids)
-        ws = tl.where(ks == j, wj, ws)
-        sel = tl.where(e == idx, float("-inf"), sel)
-    ws = ws / (tl.sum(ws, 0) + 1e-20) * scale
-    tl.store(Ids + t * TOPK + ks, ids)
-    tl.store(Wts + t * TOPK + ks, ws)
+_ROUTER_COUNTERS: dict = {}
 
 
 def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale):
     t, h = x.shape
     e = w_bf16.shape[0]
-    _router_kernel[(t, e // 16)](x, x.stride(0), w_bf16, logits_buf, H=h, E=e, BE=16, BK=256, num_warps=4)
-    _topk_kernel[(t,)](logits_buf, bias, ids, wts, E=e, TOPK=top_k, scale=scale, num_warps=4)
+    key = (x.device.index, logits_buf.data_ptr())
+    cnt = _ROUTER_COUNTERS.get(key)
+    if cnt is None or cnt.numel() < logits_buf.shape[0]:
+        cnt = torch.zeros(logits_buf.shape[0], dtype=torch.int32, device=x.device)
+        _ROUTER_COUNTERS[key] = cnt
+    be = 2
+    _router_topk_kernel[(t, e // be)](x, x.stride(0), w_bf16, bias, logits_buf, cnt, ids, wts, scale,
+                                      H=h, BH=triton.next_power_of_2(h), E=e, BE=be, TOPK=top_k, num_warps=4)
 
 
 # ------------------------------------------------------------------------- post mlp
@@ -474,9 +486,9 @@ def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=No
     strides) or fp32 (no norm)."""
     _, t, h = hs.shape
     rank = cfg.gate_rank
-    _msg_down_kernel[(t, n_gate, rank // 16)](
+    _msg_down_kernel[(t, n_gate, rank // 4)](
         hs, hs.stride(0), hs.stride(1), ms, ms.stride(0), ms.stride(1), lw.ctl_down, g_buf, cfg.rms_eps,
-        GATE0=gate0, NGATE=n_gate, H=h, BH=triton.next_power_of_2(h), RANK=rank, BR=16, BK=512, num_warps=4,
+        GATE0=gate0, NGATE=n_gate, H=h, BH=triton.next_power_of_2(h), RANK=rank, BR=4, BK=1024, num_warps=4,
     )
     bc = 128
     nblk = triton.cdiv(h, bc)

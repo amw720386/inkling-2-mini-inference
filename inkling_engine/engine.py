@@ -99,7 +99,53 @@ class Engine:
         self.verify = {m: VerifyGraph(self.model, self.cache, m) for m in VERIFY_WIDTHS} if spec and graphs else {}
         if spec and graphs:
             self.drafter.capture()
+        self.gamma = 2.0
+        self.gamma = 2.0
+        self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
+
+    def _calibrate(self) -> dict[int, float]:
+        """Measured ms of a round per verify width (draft + verify), for the width policy."""
+        def t(fn, n=20):
+            fn()
+            torch.cuda.synchronize()
+            e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            e0.record()
+            for _ in range(n):
+                fn()
+            e1.record()
+            torch.cuda.synchronize()
+            return e0.elapsed_time(e1) / n
+
+        draft = t(lambda: self.drafter.graphs[min(self.drafter.graphs)].replay())
+        snap = [x[:, 0].clone() for x in (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)]
+        costs = {m: draft + t(lambda g=g: g.graph.replay()) for m, g in self.verify.items()}
+        for x, v in zip((self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv), snap):
+            x[:, 0].copy_(v)
+        self.drafter.reset()
+        return costs
+
+    def _expected(self, conf: list[float], m: int) -> float:
+        """Expected accepted drafts of a width-m verify: leading products of conf ** gamma."""
+        exp, run = 0.0, 1.0
+        for c in conf[:m - 1]:
+            run *= c ** self.gamma
+            exp += run
+        return exp
+
+    def _pick_width(self, conf: list[float]) -> int:
+        """Width maximizing expected committed tokens per ms. The drafter's confidences overstate
+        acceptance; gamma (confidence ** gamma) is tuned online by `_observe`."""
+        best, best_rate = VERIFY_WIDTHS[0], -1.0
+        for m in VERIFY_WIDTHS:
+            rate = (1.0 + self._expected(conf, m)) / self.costs[m]
+            if rate > best_rate:
+                best, best_rate = m, rate
+        return best
+
+    def _observe(self, conf: list[float], m: int, accepted: int):
+        err = accepted - self._expected(conf, m)
+        self.gamma = min(8.0, max(0.5, self.gamma - 0.05 * err))
 
     # ------------------------------------------------------------------ prefill
     @torch.inference_mode()
@@ -141,9 +187,9 @@ class Engine:
                 P += 1
                 continue
             drafts, conf = self.drafter.draft(out[-1], P)
-            info = torch.cat([(conf > self.spec_threshold).int().cumprod(0).sum(0, keepdim=True), drafts.int()])
-            lead, *drafted = info.tolist()  # one sync
-            m = next(w for w in VERIFY_WIDTHS if w >= lead + 1)
+            info = torch.cat([conf, drafts.float()]).tolist()  # one sync
+            confs, drafted = info[:7], [int(d) for d in info[7:]]
+            m = self._pick_width(confs)
             vt = self.verify_tokens[m]
             vt[0] = out[-1]
             vt[1:].copy_(drafts[:m - 1])
@@ -152,6 +198,7 @@ class Engine:
             acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
             acc, *tgt = torch.cat([acc_t, target.int()]).tolist()  # one sync
             commit = acc + 1
+            self._observe(confs, m, acc)
             self.cache.commit_spec(0, commit)
             self.drafter.commit(taps[:commit], P)
             new = drafted[:acc] + [tgt[acc]]

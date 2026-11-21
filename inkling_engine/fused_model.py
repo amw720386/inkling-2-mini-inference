@@ -22,11 +22,12 @@ from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
 from .ops.conv_triton import _conv_state_kernel, conv_candidates
 from .ops.gemv_triton import mm as dense_mm
-from .ops.moe_triton import moe_decode, moe_prefill
+from .ops.moe_triton import GroupedScratch, moe_decode, moe_grouped_small, moe_prefill
 from .weights import ModelWeights
 
 DIRECT_CACHE_MAX_NEW = 64  # ring slack: chunks this small may write the cache before attention
 DECODE_MOE_MAX_TOKENS = 16
+GROUPED_MIN_TOKENS = 4  # below this the per-(token, expert) GEMV is faster
 
 
 @dataclass
@@ -69,6 +70,7 @@ class Workspace:
         small = t <= DECODE_MOE_MAX_TOKENS
         self.act = z(t * cfg.top_k, cfg.moe_inter) if small else None
         self.rows = z(t * cfg.top_k, h, dt=f32) if small else None
+        self.grouped = GroupedScratch(t, cfg.top_k, cfg.n_experts, h, cfg.moe_inter, device) if small and t >= GROUPED_MIN_TOKENS else None
         self.hidden = z(t, h)
         self.logits = z(max_out, cfg.unpadded_vocab_size, dt=f32)
         self.logits_bf16 = z(max_out, cfg.unpadded_vocab_size)
@@ -226,11 +228,15 @@ class FusedModel:
                              norm_w=lw.mlp_norm[None], tmp=ws.tmp[:1, :T])
 
             # ---- MoE
-            fk.route(x, ex.router_bf16, lw.router_bias, ws.rlog[:T], ws.ids[:T], ws.wts[:T], c.top_k, c.route_scale)
+            fk.route(x, ex.router_bf16, lw.router_bias, ws.rlog, ws.ids[:T], ws.wts[:T], c.top_k, c.route_scale)
             dst = blk[nb]
             if T <= DECODE_MOE_MAX_TOKENS and ws.rows is not None:
-                rows = moe_decode(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
-                                  ws.act[:T * c.top_k], ws.rows[:T * c.top_k])
+                if T >= GROUPED_MIN_TOKENS and ws.grouped is not None:
+                    rows = moe_grouped_small(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap,
+                                             c.mlp_up_softcap, ws.grouped, ws.rows)
+                else:
+                    rows = moe_decode(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
+                                      ws.act[:T * c.top_k], ws.rows[:T * c.top_k])
                 fk.post_mlp(rows, ws.m[:T], lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq,
                             c, decode_state=decode_state)
                 m = ws.m[:T]

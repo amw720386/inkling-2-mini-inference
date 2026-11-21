@@ -42,7 +42,7 @@ del a, b
 
 ROT = 12  # distinct weight copies, > L2
 for name, n, k in [("w_all", 8600, 2304), ("w_qgrs", 6552, 2304), ("wk", 1024, 2304), ("wo", 2304, 3072),
-                   ("dyn", 32, 2304), ("unembed", 200058, 2304)]:
+                   ("dyn", 32, 2304)]:
     rot = 1 if name == "unembed" else ROT
     ws = [torch.randn(n, k, device="cuda").to(torch.bfloat16) for _ in range(rot)]
     x = torch.randn(1, k, device="cuda").to(torch.bfloat16)
@@ -74,6 +74,11 @@ for fmt in ("nvfp4", "mxfp8"):
     wts = torch.full((1, 8), 1.0, device="cuda")
     act = torch.empty(8, 1152, dtype=torch.bfloat16, device="cuda")
     rows = torch.empty(8, 2304, dtype=torch.float32, device="cuda")
-    us = timeit(lambda i: moe_decode(x, perm[i % 16].view(1, 8), wts, w13, w2, 4.0, 25.0, act, rows))
     per = sum(t[0].numel() * t.element_size() for t in (w13.weight, w2.weight, w13.scale, w2.scale))
-    print(f"moe {fmt} bs1 (w13+w2, 8 experts): {us:.1f} us -> {8 * per / us / 1e3:.0f} GB/s")
+    for hw in ((True, False) if fmt == "nvfp4" else (True,)):
+        us = timeit(lambda i: moe_decode(x, perm[i % 16].view(1, 8), wts, w13, w2, 4.0, 25.0, act, rows, hw_fp4=hw))
+        print(f"moe {fmt} hw_fp4={hw} bs1 (w13+w2, 8 experts): {us:.1f} us -> {8 * per / us / 1e3:.0f} GB/s")
+    if fmt == "nvfp4":
+        r1 = moe_decode(x, perm[0].view(1, 8), wts, w13, w2, 4.0, 25.0, act, rows, hw_fp4=True).clone()
+        r2 = moe_decode(x, perm[0].view(1, 8), wts, w13, w2, 4.0, 25.0, act, rows, hw_fp4=False).clone()
+        print("hw vs sw decode max|d| =", (r1 - r2).abs().max().item(), "max|r| =", r2.abs().max().item())

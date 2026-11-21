@@ -98,3 +98,20 @@ def test_decode_speed(layer):
     per_expert += w13.scale[0].numel() + w2.scale[0].numel()
     gbs = 8 * per_expert / (us * 1e-6) / 1e9
     print(f"{w13.fmt} decode bs1: {us:.1f} us/call, {gbs:.0f} GB/s effective (rotating 16 expert sets)")
+
+
+@pytest.mark.parametrize("t", [2, 8, 16])
+def test_grouped_small_matches_reference(layer, t):
+    from inkling_engine.ops.moe_triton import GroupedScratch, moe_grouped_small
+
+    w13, w2, rw, rb = layer
+    torch.manual_seed(100 + t)
+    x = (torch.randn(t, 2304, device="cuda") * 0.5).to(torch.bfloat16)
+    wts, ids = ref.route(x, rw, rb, 8, 8.0)
+    sc = GroupedScratch(16, 8, 128, 2304, 1152)
+    rows = torch.empty(16 * 8, 2304, dtype=torch.float32, device="cuda")
+    out = moe_grouped_small(x, ids.int(), wts, w13, w2, 4.0, 25.0, sc, rows)
+    exp = ref_rows(x, ids, wts, w13, w2)
+    err = rel_err(out, exp)
+    print(w13.fmt, t, "grouped rel err", err)
+    assert err < 1e-2

@@ -21,7 +21,7 @@ _CONFIGS = [
 
 @triton.autotune(configs=_CONFIGS, key=["N", "K"])
 @triton.jit
-def _gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
+def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
     pid = tl.program_id(0)
     cols = pid * BN + tl.arange(0, BN)
     rows = tl.arange(0, MP)
@@ -41,7 +41,7 @@ def gemv(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     m, k = x.shape
     n = w.shape[0]
     assert m <= MAX_M and x.stride(1) == 1 and w.stride(1) == 1 and out.stride(1) == 1
-    _gemv_kernel[lambda meta: (triton.cdiv(n, meta["BN"]),)](
+    _dense_gemv_kernel[lambda meta: (triton.cdiv(n, meta["BN"]),)](
         x, w, out, m, n, k, x.stride(0), w.stride(0), out.stride(0), MP=16,
     )
     return out
