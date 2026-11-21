@@ -113,3 +113,27 @@ def short_conv(x, state, meta, tok_seq, weight=None, static=None, dyn=None, ch_p
         c, k, BC=512, num_warps=4,
     )
     return out
+
+
+@triton.jit
+def _conv_cand_kernel(X, x_stride, State, st_row, Cand, cand_stride_c, cand_row, C: tl.constexpr, BC: tl.constexpr):
+    """Speculative verify of one sequence: Cand[c] = the conv state after committing the first c + 1 rows
+    of the chunk X (last 3 of [old state, x_0..x_c]); the old State is left untouched."""
+    cidx = tl.program_id(0)
+    pc = tl.program_id(1)
+    ch = pc * BC + tl.arange(0, BC)
+    cm = ch < C
+    n = cidx + 1
+    for r in tl.static_range(3):
+        src = n - 3 + r
+        from_x = src >= 0
+        vx = tl.load(X + src.to(tl.int64) * x_stride + ch, mask=from_x & cm, other=0.0)
+        vs = tl.load(State + (3 + src).to(tl.int64) * st_row + ch, mask=(~from_x) & cm, other=0.0)
+        tl.store(Cand + cidx * cand_stride_c + r * cand_row + ch, tl.where(from_x, vx, vs), mask=cm)
+
+
+def conv_candidates(x, state_slot, cand):
+    """x [m, C] chunk inputs; state_slot [3, C] (the slot's current state); cand [>=m, 3, C]."""
+    m, c = x.shape
+    _conv_cand_kernel[(m, triton.cdiv(c, 512))](x, x.stride(0), state_slot, state_slot.stride(0), cand,
+                                                cand.stride(0), cand.stride(1), c, BC=512, num_warps=4)

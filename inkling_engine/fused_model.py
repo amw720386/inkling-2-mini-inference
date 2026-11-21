@@ -20,7 +20,7 @@ from .fast import StepMeta, build_step_meta, pick_splits
 from .ops import fused_triton as fk
 from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
-from .ops.conv_triton import _conv_state_kernel
+from .ops.conv_triton import _conv_state_kernel, conv_candidates
 from .ops.gemv_triton import mm as dense_mm
 from .ops.moe_triton import moe_decode, moe_prefill
 from .weights import ModelWeights
@@ -72,6 +72,7 @@ class Workspace:
         self.hidden = z(t, h)
         self.logits = z(max_out, cfg.unpadded_vocab_size, dt=f32)
         self.logits_bf16 = z(max_out, cfg.unpadded_vocab_size)
+        self.taps = z(t, 4, h)  # DSpark features of each row (see FusedModel.tap_visits)
         self.part_acc = z(t, cfg.num_heads, n_split, cfg.head_dim, dt=f32) if n_split > 1 else None
         self.part_ml = z(t, cfg.num_heads, n_split, 2, dt=f32) if n_split > 1 else None
 
@@ -91,6 +92,10 @@ class FusedModel:
         self.sms = torch.cuda.get_device_properties(0).multi_processor_count
         self.capture_visits: list[int] = []
         self.captures: dict[int, torch.Tensor] = {}
+        # DSpark taps: the partial block entering these visits, then the final normed hidden -> ws.taps
+        tl_ids = list(cfg.mtp.get("target_layer_ids", [5, 23, 41, 48]))
+        self.tap_visits = {v: j for j, v in enumerate(tl_ids[:-1])}
+        self.write_taps = False
 
     # ---------------------------------------------------------------- metadata
     def step_meta(self, batch: Batch) -> StepMeta:
@@ -107,13 +112,17 @@ class FusedModel:
     # ----------------------------------------------------------------- forward
     @torch.no_grad()
     def forward(self, batch: Batch, cache: InklingCache, ws: Workspace, meta: StepMeta | None = None,
-                decode_state: bool | None = None, n_out: int | None = None):
+                decode_state: bool | None = None, n_out: int | None = None, verify: bool = False):
+        """verify: one sequence whose conv states must stay rollback-able; candidates go to cache.cand."""
         c, w = self.cfg, self.w
         meta = meta or self.step_meta(batch)
         T = batch.num_tokens
         assert T <= ws.max_tokens
         if decode_state is None:
-            decode_state = all(s.n == 1 for s in batch.seqs)
+            decode_state = all(s.n == 1 for s in batch.seqs) and not verify
+        if verify:
+            assert len(batch.seqs) == 1 and not decode_state
+            vslot = batch.seqs[0].slot
         direct_cache = meta.max_new <= DIRECT_CACHE_MAX_NEW
         pos = batch.positions
         blk = ws.blk[:, :T]
@@ -125,6 +134,8 @@ class FusedModel:
             lw, ex = w.layers[layer], self.extras[layer]
             if v.index in self.capture_visits:
                 self.captures[v.index] = blk[nb].clone()
+            if self.write_taps and v.index in self.tap_visits:
+                ws.taps[:T, self.tap_visits[v.index]].copy_(blk[nb])
             if v.is_core and layer == c.core_start:
                 if v.pass_idx == 0:
                     pre_nb = nb
@@ -182,8 +193,8 @@ class FusedModel:
                         meta.local, meta.tok_seq, pos, c, is_global=not local,
                         cache_kv=(kc, vc) if direct_cache else None, ring=ring, decode_state=decode_state)
             if not decode_state:
-                self._conv_state(k_lin, cache.k_conv[vi], meta)
-                self._conv_state(v_lin, cache.v_conv[vi], meta)
+                self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else conv_candidates(k_lin, cache.k_conv[vi, vslot], cache.cand['k_conv'][vi])
+                self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else conv_candidates(v_lin, cache.v_conv[vi, vslot], cache.cand['v_conv'][vi])
 
             # ---- attention
             sinks = qp[:, 2 * c.q_dim + c.rel_dim:2 * c.q_dim + c.rel_dim + c.num_heads]
@@ -206,7 +217,7 @@ class FusedModel:
                          None if msgs else lw.mlp_norm, mi_out, meta.local, meta.tok_seq, c,
                          boundary=boundary, decode_state=decode_state)
             if not decode_state:
-                self._conv_state(o, cache.attn_conv[vi], meta)
+                self._conv_state(o, cache.attn_conv[vi], meta) if not verify else conv_candidates(o, cache.attn_conv[vi, vslot], cache.cand['attn_conv'][vi])
             if boundary:
                 nb += 1
             x = ws.x[:T]
@@ -228,12 +239,14 @@ class FusedModel:
                 fk.post_mlp(None, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
                             decode_state=False)
             if not decode_state:
-                self._conv_state(m, cache.mlp_conv[vi], meta)
+                self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else conv_candidates(m, cache.mlp_conv[vi, vslot], cache.cand['mlp_conv'][vi])
 
         hidden = ws.hidden[:T]
         fk.depth_attn(blk, nb + 1, w.output_query, hidden[None], norm_w=w.final_norm[None])
         if c.num_visits in self.capture_visits:
             self.captures[c.num_visits] = hidden.clone()
+        if self.write_taps:
+            ws.taps[:T, 3].copy_(hidden)
         rows = hidden[batch.logit_rows]
         n = rows.shape[0]
         if n > ws.logits.shape[0]:  # eager only; graphs size their workspace up front

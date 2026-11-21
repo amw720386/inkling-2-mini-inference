@@ -48,6 +48,17 @@ class InklingCache:
         self.attn_conv = torch.zeros(v, s, km1, cfg.hidden_size, dtype=bf, device=device)
         self.mlp_conv = torch.zeros_like(self.attn_conv)
         self.seq_lens = torch.zeros(s, dtype=torch.int64)  # host-side bookkeeping
+        self.cand = None  # speculative verify: candidate conv states, see enable_spec
+
+    def enable_spec(self, max_verify: int, device="cuda"):
+        """Buffers for the conv states after committing 1..max_verify rows of a verify call."""
+        mk = lambda t: torch.zeros(t.shape[0], max_verify, *t.shape[2:], dtype=t.dtype, device=device)
+        self.cand = {name: mk(getattr(self, name)) for name in ("k_conv", "v_conv", "attn_conv", "mlp_conv")}
+
+    def commit_spec(self, slot: int, n_commit: int):
+        """After a verify call of the sequence in `slot`, keep the conv states of its first n_commit rows."""
+        for name, cand in self.cand.items():
+            getattr(self, name)[:, slot].copy_(cand[:, n_commit - 1])
 
     def reset_slot(self, slot: int) -> None:
         for t in (self.k_conv, self.v_conv, self.attn_conv, self.mlp_conv):
