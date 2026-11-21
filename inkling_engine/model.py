@@ -182,10 +182,13 @@ class InklingModel:
         kk = ref.l2_clip(k_c.reshape(t, c.num_kv_heads, d), c.qk_l2_clip)
         vv = ref.unweighted_rms(v_c.reshape(t, c.num_kv_heads, d), c.rms_eps).to(torch.bfloat16)
 
-        attn = be.attention(v, q, kk, vv, rel_logits, sinks, batch, cache)
+        if getattr(be, "fused_gate", False):
+            attn = be.attention(v, q, kk, vv, rel_logits, sinks, batch, cache, gate=gate)
+        else:
+            attn = be.attention(v, q, kk, vv, rel_logits, sinks, batch, cache)
+            attn = (attn.to(ref.COMPUTE) * torch.sigmoid(gate.to(ref.COMPUTE))).to(torch.bfloat16)
         if v.index == self.debug_visit:
             self.debug.update(xq=xq, xk=xk, xv=xv, k_lin=k_lin, k_c=k_c, v_c=v_c, q=q, attn=attn)
-        attn = (attn.to(ref.COMPUTE) * torch.sigmoid(gate.to(ref.COMPUTE))).to(torch.bfloat16)
         o = be.linear(attn, lw.wo)
         a = be.conv(cache.attn_conv[vi], o, lw.attn_conv_w, batch, c.conv_out_scale)
 
@@ -215,6 +218,8 @@ class InklingModel:
     def forward(self, batch: Batch, cache: InklingCache):
         """Returns (fp32 logits for batch.logit_rows, captured hidden states)."""
         c, be = self.cfg, self.be
+        if hasattr(be, "begin"):
+            be.begin(batch)
         partial = be.rms_norm(F.embedding(batch.input_ids, self.w.embed), self.w.embed_norm)
         blocks: list[torch.Tensor] = []
         captures: dict[int, torch.Tensor] = {}
@@ -238,6 +243,4 @@ class InklingModel:
             captures[c.num_visits] = hidden
         rows = hidden[batch.logit_rows]
         logits = ref.softcap(be.linear(rows, self.w.unembed).to(ref.COMPUTE), c.final_logit_softcap)
-        for s in batch.seqs:
-            cache.seq_lens[s.slot] = s.start + s.n
         return logits, captures

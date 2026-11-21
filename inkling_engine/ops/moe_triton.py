@@ -64,6 +64,22 @@ def _swiglu_pairs_2d(acc, BM: tl.constexpr, BN: tl.constexpr, GATE_CAP: tl.const
 
 
 # --------------------------------------------------------------------------- decode
+_GEMV_CONFIGS = [
+    triton.Config({"BN": bn, "BK": bk}, num_warps=nw, num_stages=ns)
+    for bn in (16, 32, 64)
+    for bk in (128, 256, 512)
+    for nw in (4, 8)
+    for ns in (2, 3)
+]
+
+
+def _prune(configs, named_args, **kw):
+    k = named_args["K"]
+    return [c for c in configs if k % c.kwargs["BK"] == 0]
+
+
+@triton.autotune(configs=_GEMV_CONFIGS, key=["N", "K", "FMT", "ACT"], restore_value=["Out"],
+                 prune_configs_by={"early_config_prune": _prune})
 @triton.jit
 def _gemv_kernel(
     X, x_row_div, x_stride,  # activations: row of pair r is r // x_row_div
@@ -75,6 +91,7 @@ def _gemv_kernel(
     GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
     BN: tl.constexpr, BK: tl.constexpr,
 ):
+    tl.static_assert(K % BK == 0)
     r = tl.program_id(0)
     pn = tl.program_id(1)
     e = tl.load(Ids + r).to(tl.int64)
@@ -142,15 +159,13 @@ def moe_decode(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Exper
     rows = rows_buf if rows_buf is not None else torch.empty(pairs, hdim, dtype=torch.float32, device=x.device)
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_f
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_f
-    bn13 = 32 if w13.fmt == "nvfp4" else 16
-    _gemv_kernel[(pairs, triton.cdiv(n13, bn13))](
+    _gemv_kernel[lambda m: (pairs, triton.cdiv(n13, m["BN"]))](
         x, k, x.stride(0), w13.weight, _scale_view(w13), f13, ids_f, act, act.stride(0), wts_f,
-        n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BN=bn13, BK=256, num_warps=4,
+        n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap,
     )
-    bn2 = 32 if w2.fmt == "nvfp4" else 16
-    _gemv_kernel[(pairs, triton.cdiv(hdim, bn2))](
+    _gemv_kernel[lambda m: (pairs, triton.cdiv(hdim, m["BN"]))](
         act, 1, act.stride(0), w2.weight, _scale_view(w2), f2, ids_f, rows, rows.stride(0), wts_f,
-        hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap, BN=bn2, BK=128 if inter % 256 else 256, num_warps=4,
+        hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap,
     )
     return rows
 
