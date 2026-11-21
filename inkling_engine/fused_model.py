@@ -21,6 +21,7 @@ from .ops import fused_triton as fk
 from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
 from .ops.conv_triton import _conv_state_kernel, conv_candidates
+from .ops.gemv_triton import Fp8Weight
 from .ops.gemv_triton import mm as dense_mm
 from .ops.moe_triton import GroupedScratch, moe_decode, moe_grouped_small, moe_prefill
 from .weights import ModelWeights
@@ -80,8 +81,17 @@ class Workspace:
 
 
 class FusedModel:
-    def __init__(self, cfg: InklingConfig, weights: ModelWeights):
+    def __init__(self, cfg: InklingConfig, weights: ModelWeights, dense_fp8: bool = False):
+        """dense_fp8: row-scaled E4M3 copies of the attention projections and the LM head for decode-sized
+        GEMVs (halves their bytes; lossy w.r.t. the bf16 checkpoint, off by default). Prefill keeps bf16."""
         self.cfg, self.w = cfg, weights
+        self.dense_fp8 = dense_fp8
+        self.fp8 = {}
+        if dense_fp8:
+            for lw in weights.layers:
+                for name in ("w_all", "w_qgrs", "wk", "wv", "wo"):
+                    self.fp8[(lw.layer, name)] = Fp8Weight(getattr(lw, name))
+            self.fp8["unembed"] = Fp8Weight(weights.unembed)
         self.visits = cfg.visits
         self.extras = []
         for lw in weights.layers:
@@ -107,6 +117,12 @@ class FusedModel:
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)
         return build_step_meta(batch, nl, ng)
+
+    def _w(self, layer: int, name: str, T: int):
+        """The projection weight for a T-token step (FP8 copy for decode-sized steps when enabled)."""
+        if self.dense_fp8 and T <= 16:
+            return self.fp8[(layer, name)]
+        return getattr(self.w.layers[layer], name)
 
     def workspace(self, max_tokens: int, max_out: int, n_split: int = 32) -> Workspace:
         return Workspace(self.cfg, max_tokens, max_out, n_split)
@@ -169,13 +185,13 @@ class FusedModel:
             # ---- projections
             if shared:
                 proj = ws.proj[:T]
-                dense_mm(xn[0], lw.w_all, proj)
+                dense_mm(xn[0], self._w(layer, 'w_all', T), proj)
                 qp, k_lin, v_lin = proj, proj[:, self.nqg:self.nqg + c.kv_dim], proj[:, self.nqg + c.kv_dim:]
             else:
                 qp = ws.qgrs[:T]
-                dense_mm(xn[0], lw.w_qgrs, qp)
-                dense_mm(xn[1], lw.wk, ws.kv_lin[0, :T])
-                dense_mm(xn[2], lw.wv, ws.kv_lin[1, :T])
+                dense_mm(xn[0], self._w(layer, 'w_qgrs', T), qp)
+                dense_mm(xn[1], self._w(layer, 'wk', T), ws.kv_lin[0, :T])
+                dense_mm(xn[2], self._w(layer, 'wv', T), ws.kv_lin[1, :T])
                 k_lin, v_lin = ws.kv_lin[0, :T], ws.kv_lin[1, :T]
             dyn = None
             if not local:
@@ -208,7 +224,7 @@ class FusedModel:
             if not direct_cache:
                 store_kv(kk, vv, kc, vc, am, ring, meta.max_new)
             o = ws.o[:T]
-            dense_mm(attn, lw.wo, o)
+            dense_mm(attn, self._w(layer, 'wo', T), o)
 
             # ---- residual + MLP input
             boundary = c.is_block_boundary(layer)
@@ -258,7 +274,7 @@ class FusedModel:
         if n > ws.logits.shape[0]:  # eager only; graphs size their workspace up front
             ws.logits = torch.empty(n, c.unpadded_vocab_size, dtype=torch.float32, device=rows.device)
             ws.logits_bf16 = torch.empty(n, c.unpadded_vocab_size, dtype=torch.bfloat16, device=rows.device)
-        dense_mm(rows, w.unembed, ws.logits_bf16[:n])
+        dense_mm(rows, self.fp8['unembed'] if (self.dense_fp8 and n <= 16) else w.unembed, ws.logits_bf16[:n])
         logits = ws.logits[:n]
         torch.div(ws.logits_bf16[:n], c.final_logit_softcap, out=logits)
         logits.tanh_().mul_(c.final_logit_softcap)

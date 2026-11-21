@@ -33,37 +33,6 @@ def _e2m1_to_f32(c):
 
 
 @triton.jit
-def _e8m0_to_f32(s):
-    return (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
-
-
-@triton.jit
-def _tanh(x):
-    # tanh(x) = 2 * sigmoid(2x) - 1, stable for large |x|
-    return 2.0 * tl.sigmoid(2.0 * x) - 1.0
-
-
-@triton.jit
-def _swiglu(g, u, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
-    return GATE_CAP * _tanh(g / GATE_CAP) * tl.sigmoid(g) * (UP_CAP * _tanh(u / UP_CAP))
-
-
-@triton.jit
-def _swiglu_pairs_1d(acc, BN: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
-    """acc [BN] interleaved (gate, up) -> [BN // 2] activation (fp32)."""
-    acc = acc.to(tl.bfloat16).to(tl.float32)  # mirror the bf16 gate_up GEMM output
-    g, u = tl.split(tl.reshape(acc, (BN // 2, 2)))
-    return _swiglu(g, u, GATE_CAP, UP_CAP)
-
-
-@triton.jit
-def _swiglu_pairs_2d(acc, BM: tl.constexpr, BN: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
-    acc = acc.to(tl.bfloat16).to(tl.float32)
-    g, u = tl.split(tl.reshape(acc, (BM, BN // 2, 2)))
-    return _swiglu(g, u, GATE_CAP, UP_CAP)
-
-
-@triton.jit
 def _e2m1x8_to_f16(words):
     """int32 words holding 8 E2M1 codes (byte b = elements 2b, 2b+1; low nibble first) ->
     four f16x2-packed int32 tensors via the hardware cvt (sm_100+/sm_120)."""
@@ -115,6 +84,37 @@ def _nvfp4_dot_words(W32, w_base, n, nmask, KW: tl.constexpr, k0, x_ptr, BN: tl.
     acc += _f16x2_lo(c3) * tl.load(xb + 6).to(tl.float32)[None, :]
     acc += _f16x2_hi(c3) * tl.load(xb + 7).to(tl.float32)[None, :]
     return tl.sum(tl.reshape(acc, (BN, BK // 16, 2)), axis=2)
+
+
+@triton.jit
+def _e8m0_to_f32(s):
+    return (s.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _tanh(x):
+    # tanh(x) = 2 * sigmoid(2x) - 1, stable for large |x|
+    return 2.0 * tl.sigmoid(2.0 * x) - 1.0
+
+
+@triton.jit
+def _swiglu(g, u, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
+    return GATE_CAP * _tanh(g / GATE_CAP) * tl.sigmoid(g) * (UP_CAP * _tanh(u / UP_CAP))
+
+
+@triton.jit
+def _swiglu_pairs_1d(acc, BN: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
+    """acc [BN] interleaved (gate, up) -> [BN // 2] activation (fp32)."""
+    acc = acc.to(tl.bfloat16).to(tl.float32)  # mirror the bf16 gate_up GEMM output
+    g, u = tl.split(tl.reshape(acc, (BN // 2, 2)))
+    return _swiglu(g, u, GATE_CAP, UP_CAP)
+
+
+@triton.jit
+def _swiglu_pairs_2d(acc, BM: tl.constexpr, BN: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
+    acc = acc.to(tl.bfloat16).to(tl.float32)
+    g, u = tl.split(tl.reshape(acc, (BM, BN // 2, 2)))
+    return _swiglu(g, u, GATE_CAP, UP_CAP)
 
 
 # --------------------------------------------------------------------------- decode
@@ -261,9 +261,16 @@ def _grouped_kernel(
         if FMT == 0:
             KB: tl.constexpr = K // 2
             KS: tl.constexpr = K // 16
-            j = tl.arange(0, BK // 2)
-            wb = tl.load(W + e * N * KB + n[:, None] * KB + (k0 // 2 + j)[None, :], mask=nmask[:, None], other=0).to(tl.int32)
-            wv = tl.reshape(tl.join(_e2m1_to_f32(wb & 15), _e2m1_to_f32(wb >> 4)), (BN, BK))
+            NW: tl.constexpr = BK // 8
+            jw = tl.arange(0, NW)
+            words = tl.load(W.to(tl.pointer_type(tl.int32), bitcast=True) + e * N * (K // 8) + n[:, None] * (K // 8)
+                            + (k0 // 8 + jw)[None, :], mask=nmask[:, None], other=0, eviction_policy="evict_first")
+            c0, c1, c2, c3 = _e2m1x8_to_f16(words)
+            t0 = tl.join(tl.join(_f16x2_lo(c0), _f16x2_hi(c0)), tl.join(_f16x2_lo(c1), _f16x2_hi(c1)))
+            t1 = tl.join(tl.join(_f16x2_lo(c2), _f16x2_hi(c2)), tl.join(_f16x2_lo(c3), _f16x2_hi(c3)))
+            # [BN, NW, b_lo, n] pairs -> element order (w, b, n) with b = 2 * b_hi + b_lo
+            u = tl.join(tl.permute(t0, (0, 1, 3, 2)), tl.permute(t1, (0, 1, 3, 2)))  # [BN, NW, b_lo, n, b_hi]
+            wv = tl.reshape(tl.permute(u, (0, 1, 4, 2, 3)), (BN, BK))
             js = tl.arange(0, BK // 16)
             sc = tl.load(S + e * N * KS + n[:, None] * KS + (k0 // 16 + js)[None, :], mask=nmask[:, None], other=0.0)
             wv = tl.reshape(tl.reshape(wv, (BN, BK // 16, 16)) * sc.to(tl.float32)[:, :, None], (BN, BK))

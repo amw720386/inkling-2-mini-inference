@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
+from .ops.gemv_triton import Fp8Weight
 from .ops.gemv_triton import mm as dense_mm
 from .weights import ModelWeights
 
@@ -88,6 +89,10 @@ class Drafter:
                 "w_down": t[p + "mlp.down_proj.weight"],
             })
         self.final_norm, self.mask_embed = t["norm.weight"], t["mask_embed"]
+        # FP8 copies for the drafter's big GEMVs (base logits over the vocab, layer projections)
+        self.head8 = Fp8Weight(self.head)
+        for L in self.layers:
+            L["qkv"], L["gate_up"] = Fp8Weight(L["qkv"]), Fp8Weight(L["gate_up"])
         mh = "markov_head."
         self.w1 = t[mh + "markov_w1.weight"]
         self.rnn_w, self.rnn_b = t[mh + "rnn_proj.weight"], t[mh + "rnn_proj.bias"]
@@ -198,7 +203,7 @@ class Drafter:
             nxt = self.layers[l + 1]["in_norm"] if l < 2 else self.final_norm
             xn = bf(rms(res, nxt))
         h = xn[1:].contiguous()  # [7, D]
-        base = dense_mm(h, self.head, self.base_out).float()
+        base = dense_mm(h, self.head8, self.base_out).float()
         cand_base, cand = base.topk(CANDIDATES, dim=-1)
         cand_w, cand_b = self.fold_w[cand], self.fold_b[cand]
         state = torch.zeros(RANK, dtype=torch.bfloat16, device=dev)

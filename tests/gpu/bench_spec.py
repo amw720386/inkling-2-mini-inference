@@ -20,7 +20,9 @@ torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
 print(torch.cuda.get_device_name(0), "| memory capped to 32 GiB")
 
 t0 = time.time()
-eng = Engine(path, max_ctx=32768, spec=True)
+fp8 = len(sys.argv) > 3 and sys.argv[3] == "fp8"
+print("dense_fp8 =", fp8)
+eng = Engine(path, max_ctx=32768, spec=True, dense_fp8=fp8)
 print(f"engine ready in {time.time() - t0:.0f}s, allocated {torch.cuda.memory_allocated() / 2**30:.2f} GiB, "
       f"peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")
 

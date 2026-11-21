@@ -29,6 +29,9 @@ image = (
         "tiktoken",
         "jinja2",
         "accelerate",
+        "fastapi",
+        "uvicorn",
+        "requests",
         f"transformers @ git+https://github.com/huggingface/transformers.git@{TRANSFORMERS_SHA}",
     )
     .env({"TRITON_CACHE_DIR": "/cache/triton", "PYTHONUNBUFFERED": "1"})
