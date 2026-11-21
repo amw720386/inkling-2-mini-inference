@@ -21,6 +21,7 @@ from .ops import fused_triton as fk
 from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
 from .ops.conv_triton import _conv_state_kernel
+from .ops.gemv_triton import mm as dense_mm
 from .ops.moe_triton import moe_decode, moe_prefill
 from .weights import ModelWeights
 
@@ -155,19 +156,19 @@ class FusedModel:
             # ---- projections
             if shared:
                 proj = ws.proj[:T]
-                torch.mm(xn[0], lw.w_all.t(), out=proj)
+                dense_mm(xn[0], lw.w_all, proj)
                 qp, k_lin, v_lin = proj, proj[:, self.nqg:self.nqg + c.kv_dim], proj[:, self.nqg + c.kv_dim:]
             else:
                 qp = ws.qgrs[:T]
-                torch.mm(xn[0], lw.w_qgrs.t(), out=qp)
-                torch.mm(xn[1], lw.wk.t(), out=ws.kv_lin[0, :T])
-                torch.mm(xn[2], lw.wv.t(), out=ws.kv_lin[1, :T])
+                dense_mm(xn[0], lw.w_qgrs, qp)
+                dense_mm(xn[1], lw.wk, ws.kv_lin[0, :T])
+                dense_mm(xn[2], lw.wv, ws.kv_lin[1, :T])
                 k_lin, v_lin = ws.kv_lin[0, :T], ws.kv_lin[1, :T]
             dyn = None
             if not local:
                 nk = c.num_kv_heads * c.sconv_kernel
-                torch.mm(xn[1] if not shared else xn[0], lw.kv_dyn_proj[:nk].t(), out=ws.dyn[0, :T])
-                torch.mm(xn[2] if not shared else xn[0], lw.kv_dyn_proj[nk:].t(), out=ws.dyn[1, :T])
+                dense_mm(xn[1] if not shared else xn[0], lw.kv_dyn_proj[:nk], ws.dyn[0, :T])
+                dense_mm(xn[2] if not shared else xn[0], lw.kv_dyn_proj[nk:], ws.dyn[1, :T])
                 dyn = (ws.dyn[0, :T], ws.dyn[1, :T])
 
             if local:
@@ -194,7 +195,7 @@ class FusedModel:
             if not direct_cache:
                 store_kv(kk, vv, kc, vc, am, ring, meta.max_new)
             o = ws.o[:T]
-            torch.mm(attn, lw.wo.t(), out=o)
+            dense_mm(attn, lw.wo, o)
 
             # ---- residual + MLP input
             boundary = c.is_block_boundary(layer)
@@ -238,7 +239,7 @@ class FusedModel:
         if n > ws.logits.shape[0]:  # eager only; graphs size their workspace up front
             ws.logits = torch.empty(n, c.unpadded_vocab_size, dtype=torch.float32, device=rows.device)
             ws.logits_bf16 = torch.empty(n, c.unpadded_vocab_size, dtype=torch.bfloat16, device=rows.device)
-        torch.mm(rows, w.unembed.t(), out=ws.logits_bf16[:n])
+        dense_mm(rows, w.unembed, ws.logits_bf16[:n])
         logits = ws.logits[:n]
         torch.div(ws.logits_bf16[:n], c.final_logit_softcap, out=logits)
         logits.tanh_().mul_(c.final_logit_softcap)
