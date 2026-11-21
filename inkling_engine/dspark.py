@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from .ops.gemv_triton import Fp8Weight
+from .ops.markov_triton import MarkovHead
 from .ops.gemv_triton import mm as dense_mm
 from .weights import ModelWeights
 
@@ -99,7 +100,7 @@ class Drafter:
         self.rnn_w, self.rnn_b = t[mh + "rnn_proj.weight"], t[mh + "rnn_proj.bias"]
         # step-dependent columns [state, W1[prev]] vs step-independent [h_i, f_rnn] (precomputed per round)
         self.rnn_w_step = self.rnn_w[:, :2 * RANK].contiguous()
-        self.rnn_w_rest = self.rnn_w[:, 2 * RANK:].contiguous()
+        self.rnn_w_rest = self.rnn_w[:, 2 * RANK:].float().t().contiguous()  # fp32 [4608, 768]
         self.f_norm = t[mh + "dflare_norm.weight"]
         D, V = self.embed.shape[1], self.head.shape[0]
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=device)  # noqa: E731
@@ -125,6 +126,8 @@ class Drafter:
         self.commit_feats = torch.zeros(BLOCK, 4, D, **kv)
         self.commit_start = torch.zeros(1, dtype=torch.long, device=device)
         self.commit_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.fused_head = True  # Triton Markov head (2 launches per step); False: the torch reference loop
+        self.head_kernels = MarkovHead(GAMMA, RANK, CANDIDATES, device)
 
     def reset(self):
         for l in LOCAL:
@@ -210,11 +213,16 @@ class Drafter:
         h = xn[1:].contiguous()  # [7, D]
         base = dense_mm(h, self.head8, self.base_out).float()
         cand_base, cand = base.topk(CANDIDATES, dim=-1)
+        rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest  # [7, 768]
+        if self.fused_head:
+            self.head_kernels.run(rest.contiguous(), cand_base.contiguous(), cand.contiguous(), self.rnn_w_step,
+                                  self.rnn_b, self.w1, self.anchor, self.fold_w, self.fold_b, self.draft_tokens,
+                                  self.conf)
+            return self.draft_tokens, self.conf
         cand_w, cand_b = self.fold_w[cand], self.fold_b[cand]
         state = torch.zeros(RANK, dtype=torch.bfloat16, device=dev)
         prev = self.anchor
         tokens, all_logits = [], []
-        rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest.float().T  # [7, 768]
         for i in range(GAMMA):
             z = torch.cat([state, self.w1[prev][0]])
             raw = bf(z.float() @ self.rnn_w_step.float().T + rest[i] + self.rnn_b.float()).float()

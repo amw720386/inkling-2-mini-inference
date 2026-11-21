@@ -9,10 +9,10 @@ torch 2.9.1+cu128, Triton 3.5.1).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 149.9 tok/s | 235.3 tok/s | 144.3 tok/s | 227.6 tok/s |
+| bf16 | 153.3 tok/s | 255.6 tok/s | 145.5 tok/s | 240.9 tok/s |
 | `dense_fp8` | 172.9 tok/s | 251.7 tok/s | 164.1 tok/s | 239.0 tok/s |
 
-DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Graph replay costs
+DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
 
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
