@@ -112,7 +112,7 @@ class FusedModel:
     # ---------------------------------------------------------------- metadata
     def step_meta(self, batch: Batch) -> StepMeta:
         max_new = max(s.n for s in batch.seqs)
-        tok = 16 if max_new > 8 else 4
+        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
         n_tiles = sum((s.n + tok - 1) // tok for s in batch.seqs)
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)
@@ -209,7 +209,8 @@ class FusedModel:
             q, rel, kk, vv = ws.q[:T], ws.rel[:T], ws.k[:T], ws.v[:T]
             fk.qkv_post(qp, 2 * c.q_dim, k_lin, v_lin, dyn, lw, cache.k_conv[vi], cache.v_conv[vi], q, rel, kk, vv,
                         meta.local, meta.tok_seq, pos, c, is_global=not local,
-                        cache_kv=(kc, vc) if direct_cache else None, ring=ring, decode_state=decode_state)
+                        cache_kv=(kc, vc) if direct_cache else None, ring=ring, decode_state=decode_state,
+                        kv_fp8=(not local) and kc.dtype == torch.float8_e4m3fn)
             if not decode_state:
                 self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else conv_candidates(k_lin, cache.k_conv[vi, vslot], cache.cand['k_conv'][vi])
                 self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else conv_candidates(v_lin, cache.v_conv[vi, vslot], cache.cand['v_conv'][vi])

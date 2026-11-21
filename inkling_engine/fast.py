@@ -33,7 +33,7 @@ class StepMeta:
 
 def build_step_meta(batch: Batch, n_split_local: int, n_split_global: int, device="cuda") -> StepMeta:
     max_new = max(s.n for s in batch.seqs)
-    tok = 16 if max_new > 8 else 4
+    tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
     loc = AttnMeta.build(batch.seqs, batch.offsets, tok, n_split_local, device)
     glob = AttnMeta(loc.seq_slot, loc.seq_start, loc.seq_off, loc.seq_n, loc.tile_seq, loc.tile_q0, loc.n_tiles,
                     tok, n_split_global, loc.max_keys)
@@ -66,7 +66,7 @@ class FastBackend(RefBackend):
         if self.static_meta:
             return
         max_new = max(s.n for s in batch.seqs)
-        tok = 16 if max_new > 8 else 4
+        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
         n_tiles = sum((s.n + tok - 1) // tok for s in batch.seqs)
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)

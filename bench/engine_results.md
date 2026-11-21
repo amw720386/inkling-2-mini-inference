@@ -17,6 +17,20 @@ DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by promp
 
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
 
+## Long context (`tests/gpu/longctx.py`, `kv_fp8`)
+
+`kv_fp8` stores the full-attention layers' K/V as E4M3 (16 KiB per token over the 8 global visits; sliding rings
+stay bf16), and every read uses the rounded value, so prefill, decode and verify agree. At 4k context the greedy
+output equals the bf16 cache's for all 64 tokens checked.
+
+| max_ctx 262,144, `kv_fp8`, DSpark on | |
+|---|---:|
+| memory after start-up / peak (incl. a 131k prefill) | 25.3 / 28.6 GiB |
+| prefill of a 131,072-token prompt | 26.3 s (4,975 tok/s) |
+| decode at 131k context, plain / DSpark | 112 / 123 tok/s |
+
+SGLang's RTX 5090 recipe caps the context at 65,536 (Balanced) and 31,737 (DSpark) tokens under 32 GiB.
+
 ## Prefill
 
 ~13k tok/s on an 8k prompt (2048-token chunks), ~6k tok/s on a 512-token prompt.

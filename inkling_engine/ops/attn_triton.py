@@ -125,7 +125,7 @@ def _attn_kernel(
         crow = (off + kpos - start).to(tl.int64)
         mc = k_ok & from_cache
         mn = k_ok & (kpos >= start)
-        k_c = tl.load(kcache_base + cidx[:, None] * cache_stride_pos + d[None, :], mask=mc[:, None], other=0.0)
+        k_c = tl.load(kcache_base + cidx[:, None] * cache_stride_pos + d[None, :], mask=mc[:, None], other=0.0).to(tl.bfloat16)
         k_n = tl.load(KC + crow[:, None] * kc_stride_t + kvh * D + d[None, :], mask=mn[:, None], other=0.0)
         k = k_c + k_n
         s = tl.dot(q, tl.trans(k)) * scale
@@ -141,7 +141,7 @@ def _attn_kernel(
         alpha = tl.exp(m_i - m_safe)
         p = tl.exp(s - m_safe[:, None])
         l_i = l_i * alpha + tl.sum(p, 1)
-        v_c = tl.load(vcache_base + cidx[:, None] * cache_stride_pos + d[None, :], mask=mc[:, None], other=0.0)
+        v_c = tl.load(vcache_base + cidx[:, None] * cache_stride_pos + d[None, :], mask=mc[:, None], other=0.0).to(tl.bfloat16)
         v_n = tl.load(VC + crow[:, None] * kc_stride_t + kvh * D + d[None, :], mask=mn[:, None], other=0.0)
         v = v_c + v_n
         acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
@@ -235,8 +235,8 @@ def _store_kv_kernel(KN, VN, kn_stride_t, KCache, VCache, cache_stride_slot, cac
     cpos = (pos % RING) if RING > 0 else pos
     c = tl.arange(0, KVD)
     dst = slot * cache_stride_slot + cpos.to(tl.int64) * cache_stride_pos + c
-    tl.store(KCache + dst, tl.load(KN + trow * kn_stride_t + c))
-    tl.store(VCache + dst, tl.load(VN + trow * kn_stride_t + c))
+    tl.store(KCache + dst, tl.load(KN + trow * kn_stride_t + c).to(KCache.dtype.element_ty))
+    tl.store(VCache + dst, tl.load(VN + trow * kn_stride_t + c).to(VCache.dtype.element_ty))
 
 
 def store_kv(k_new, v_new, k_cache, v_cache, meta: AttnMeta, ring: int, max_new: int):

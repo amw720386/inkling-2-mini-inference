@@ -87,11 +87,12 @@ class VerifyGraph:
 
 class Engine:
     def __init__(self, model_dir: str, max_ctx: int = 32768, spec: bool = True, spec_threshold: float = 0.8,
-                 prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False):
+                 prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False, kv_fp8: bool = False):
         self.cfg = InklingConfig.from_pretrained(model_dir)
         self.w = load_weights(self.cfg, model_dir)
         ring = self.cfg.sliding_window + 64
-        self.cache = InklingCache(self.cfg, CacheSpec(slots=1, max_ctx=max_ctx + 16, ring=ring))
+        kv_dtype = torch.float8_e4m3fn if kv_fp8 else torch.bfloat16
+        self.cache = InklingCache(self.cfg, CacheSpec(slots=1, max_ctx=max_ctx + 16, ring=ring, kv_dtype=kv_dtype))
         self.model = FusedModel(self.cfg, self.w, dense_fp8=dense_fp8)
         self.prefill_chunk = prefill_chunk
         self.pws = self.model.workspace(prefill_chunk, 1)

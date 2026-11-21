@@ -20,11 +20,11 @@ class CacheSpec:
     slots: int
     max_ctx: int
     ring: int  # >= sliding_window + max tokens appended per step (spec verify)
-    kv_dtype: torch.dtype = torch.bfloat16
+    kv_dtype: torch.dtype = torch.bfloat16  # global (full-attention) layers; sliding rings stay bf16
 
     def bytes(self, cfg: InklingConfig) -> int:
-        per_tok = 2 * cfg.kv_dim * torch.tensor([], dtype=self.kv_dtype).element_size()
-        kv = per_tok * self.slots * (cfg.num_global_visits * self.max_ctx + cfg.num_local_visits * self.ring)
+        gb = 2 * cfg.kv_dim * torch.tensor([], dtype=self.kv_dtype).element_size()
+        kv = self.slots * (gb * cfg.num_global_visits * self.max_ctx + 4 * cfg.kv_dim * cfg.num_local_visits * self.ring)
         conv = 2 * self.slots * cfg.num_visits * (cfg.sconv_kernel - 1) * (2 * cfg.kv_dim + 2 * cfg.hidden_size)
         return kv + conv
 
@@ -39,7 +39,7 @@ class InklingCache:
         dt = spec.kv_dtype
         self.global_k = torch.zeros(g, s, spec.max_ctx, kvh, d, dtype=dt, device=device)
         self.global_v = torch.zeros_like(self.global_k)
-        self.local_k = torch.zeros(l, s, spec.ring, kvh, d, dtype=dt, device=device)
+        self.local_k = torch.zeros(l, s, spec.ring, kvh, d, dtype=torch.bfloat16, device=device)
         self.local_v = torch.zeros_like(self.local_k)
         km1, v = cfg.sconv_kernel - 1, cfg.num_visits
         bf = torch.bfloat16

@@ -14,6 +14,7 @@ path is a small set of fused Triton kernels captured in CUDA graphs, with DSpark
 | Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences |
 | Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, sampling, prefix reuse across chat turns) |
 | Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head (faster, not bit-faithful to the bf16 checkpoint) |
+| Long context | `kv_fp8`: E4M3 cache for the full-attention layers; 256k context fits in 32 GiB (25.3 GiB after start-up), 123 tok/s DSpark decode at 131k |
 
 ## Performance
 
@@ -56,7 +57,7 @@ bench/             SGLang baseline results and a survey of other Inkling 2 engin
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install safetensors tokenizers transformers fastapi uvicorn
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark on
-python -m inkling_engine.server --model /path/to/Inkling-2-Mini --dense-fp8 --max-ctx 131072
+python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144
 ```
 
 GPU tests and benchmarks (Modal, `RTX-PRO-6000`):

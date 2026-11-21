@@ -234,6 +234,7 @@ def main():
     ap.add_argument("--max-ctx", type=int, default=65536)
     ap.add_argument("--no-spec", action="store_true")
     ap.add_argument("--dense-fp8", action="store_true")
+    ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
     ap.add_argument("--model-id", default="inkling-2-mini")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -243,7 +244,8 @@ def main():
     from .engine import Engine
 
     tok = AutoTokenizer.from_pretrained(a.model)
-    eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8)
+    eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
+                 kv_fp8=a.kv_fp8)
     uvicorn.run(build_app(Server(eng, tok, a.model_id)), host=a.host, port=a.port, log_level="info")
 
 

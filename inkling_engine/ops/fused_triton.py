@@ -160,6 +160,7 @@ def _qkv_post_kernel(
     H: tl.constexpr, KVH: tl.constexpr, D: tl.constexpr, DR: tl.constexpr, RE: tl.constexpr,
     R_COL: tl.constexpr, K: tl.constexpr,
     GLOBAL: tl.constexpr, WRITE_CACHE: tl.constexpr, RING: tl.constexpr, DECODE_STATE: tl.constexpr,
+    KV_FP8: tl.constexpr = False,
 ):
     t = tl.program_id(0).to(tl.int64)
     kvh = tl.program_id(1)
@@ -211,20 +212,23 @@ def _qkv_post_kernel(
     v = ((va + xv) * conv_scale).to(tl.bfloat16).to(tl.float32)
     k = _l2clip_vec(k, qk_thr).to(tl.bfloat16)
     v = (v * _rms_inv(tl.sum(v * v, 0), D, eps)).to(tl.bfloat16)
+    if KV_FP8:  # every later read sees the E4M3 value, this call's own keys included
+        k = tl.minimum(tl.maximum(k.to(tl.float32), -448.0), 448.0).to(tl.float8e4nv).to(tl.bfloat16)
+        v = tl.minimum(tl.maximum(v.to(tl.float32), -448.0), 448.0).to(tl.float8e4nv).to(tl.bfloat16)
     tl.store(KOut + (t * KVH + kvh) * D + d, k)
     tl.store(VOut + (t * KVH + kvh) * D + d, v)
     if WRITE_CACHE:
         cp = (pos % RING) if RING > 0 else pos
         dst = slot * c_slot + cp.to(tl.int64) * c_pos + kvh * D + d
-        tl.store(KCache + dst, k)
-        tl.store(VCache + dst, v)
+        tl.store(KCache + dst, k.to(KCache.dtype.element_ty))
+        tl.store(VCache + dst, v.to(VCache.dtype.element_ty))
     if DECODE_STATE:
         _write_decode_state(KL, kv_stride, t, KState, st_base, st_row, ch, cm)
         _write_decode_state(VL, kv_stride, t, VState, st_base, st_row, ch, cm)
 
 
 def qkv_post(qp, r_col, k_lin, v_lin, dyn_kv, lw, kstate, vstate, q_out, r_out, k_out, v_out, meta, tok_seq,
-             positions, cfg, *, is_global, cache_kv=None, ring=0, decode_state=False):
+             positions, cfg, *, is_global, cache_kv=None, ring=0, decode_state=False, kv_fp8=False):
     """dyn_kv: (dyn_k, dyn_v) [T, KVH*K] views with equal row stride (global layers)."""
     t = q_out.shape[0]
     kvh, d = cfg.num_kv_heads, cfg.head_dim
@@ -244,6 +248,7 @@ def qkv_post(qp, r_col, k_lin, v_lin, dyn_kv, lw, kstate, vstate, q_out, r_out, 
         cfg.dyn_conv_out_scale if is_global else cfg.conv_out_scale, cfg.rms_eps,
         H=cfg.num_heads, KVH=kvh, D=d, DR=cfg.d_rel, RE=cfg.rel_extent, R_COL=r_col, K=cfg.sconv_kernel,
         GLOBAL=is_global, WRITE_CACHE=cache_kv is not None, RING=ring, DECODE_STATE=decode_state,
+        KV_FP8=kv_fp8,
         num_warps=4,
     )
 
