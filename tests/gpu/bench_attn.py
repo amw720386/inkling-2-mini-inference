@@ -109,14 +109,22 @@ for kind, cap, ring, window in (("local", W + 64, W + 64, W), ("global", START +
     vc = torch.randn(1, cap, KVH, D, device="cuda").to(torch.bfloat16)
     keys = min(window, START + T) if window else START + T / 2
     flops = 4 * T * H * D * keys
-    for name in ABLATIONS:
+    for name in (ABLATIONS if len(sys.argv) <= 4 else ["full"]):
         mod = variant(name)
         for tok in (32,):
             from inkling_engine.fast import pick_splits  # noqa: E402
 
             tok = 4 if T <= 4 else (8 if T <= 8 else (16 if T <= 256 else 32))  # as build_step_meta
             nl, ng = pick_splits(START + T, (T + tok - 1) // tok, KVH, torch.cuda.get_device_properties(0).multi_processor_count, W)
-            meta = mod.AttnMeta.build(seqs, [0], tok_per_tile=tok, n_split=nl if window else ng)
+            ns_list = [int(x) for x in sys.argv[4].split(",")] if len(sys.argv) > 4 else [nl if window else ng]
+            for ns_ in ns_list[:-1]:  # extra split counts first (fourth argument), timed in the loop below
+                m2 = mod.AttnMeta.build(seqs, [0], tok_per_tile=tok, n_split=ns_)
+                ms2 = timed(lambda: mod.inkling_attention(q, kn, vn, kc, vc, rel, sinks, gate, m2, window=window,
+                                                          ring=ring, scale=D ** -0.5))
+                kv_b = 2 * min(keys, START + T) * KVH * D * 2
+                print(f"{kind:6s} {name:15s} tok {tok:3d} splits {ns_:2d}: {ms2 * 1000:7.1f} us  "
+                      f"{kv_b / ms2 / 1e6:6.0f} GB/s K/V")
+            meta = mod.AttnMeta.build(seqs, [0], tok_per_tile=tok, n_split=ns_list[-1])
             if name == "gather":
                 fn = lambda: mod.inkling_attention(q, kn, vn, kc, vc, rstate, sinks, gate, meta, window=window,
                                                    ring=ring, scale=D ** -0.5, proj=proj)

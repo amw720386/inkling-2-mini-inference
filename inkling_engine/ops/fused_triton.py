@@ -42,32 +42,35 @@ def _rms_inv(ss, n: tl.constexpr, eps):
 # ----------------------------------------------------------------------- depth attn
 @triton.jit
 def _depth_attn_row(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA: tl.constexpr,
-                    q, hmask, H: tl.constexpr, BH: tl.constexpr, eps):
-    """Online softmax over sources of one token row; returns fp32 [BH] output."""
+                    q, hmask, H: tl.constexpr, BH: tl.constexpr, eps, NS: tl.constexpr = 8, xe_reg=None,
+                    EXTRA_REG: tl.constexpr = False):
+    """Softmax attention of one token row over its sources (at most NS, plus an optional extra row); returns fp32
+    [BH]. All sources load as one [NS, BH] tile, so their loads overlap and the reductions run together (a
+    per-source loop serialized a load and two block reductions per source)."""
     h = tl.arange(0, BH)
-    m_i = float("-inf")
-    l_i = 0.0
-    acc = tl.zeros((BH,), tl.float32)
-    for s in range(ns):
-        x = tl.load(Src + s * src_stride_s + src_row + h, mask=hmask, other=0.0).to(tl.float32)
-        rinv = _rms_inv(tl.sum(x * x, 0), H, eps)
-        logit = tl.sum(x * q, 0) * rinv
-        m_new = tl.maximum(m_i, logit)
-        a = tl.exp(m_i - m_new)
-        p = tl.exp(logit - m_new)
-        l_i = l_i * a + p
-        acc = acc * a + (p * rinv) * x
-        m_i = m_new
+    sv = tl.arange(0, NS)
+    sm = sv < ns
+    x = tl.load(Src + sv[:, None] * src_stride_s + src_row + h[None, :], mask=sm[:, None] & hmask[None, :],
+                other=0.0).to(tl.float32)
+    rinv = _rms_inv(tl.sum(x * x, 1), H, eps)  # [NS]
+    logit = tl.where(sm, tl.sum(x * q[None, :], 1) * rinv, float("-inf"))
+    m = tl.max(logit, 0)
     if HAS_EXTRA:
-        x = tl.load(Extra + extra_row + h, mask=hmask, other=0.0)
-        rinv = _rms_inv(tl.sum(x * x, 0), H, eps)
-        logit = tl.sum(x * q, 0) * rinv
-        m_new = tl.maximum(m_i, logit)
-        a = tl.exp(m_i - m_new)
-        p = tl.exp(logit - m_new)
-        l_i = l_i * a + p
-        acc = acc * a + (p * rinv) * x
-    return acc / l_i
+        if EXTRA_REG:  # the caller's row, already in registers
+            xe = xe_reg
+        else:
+            xe = tl.load(Extra + extra_row + h, mask=hmask, other=0.0).to(tl.float32)
+        rinv_e = _rms_inv(tl.sum(xe * xe, 0), H, eps)
+        logit_e = tl.sum(xe * q, 0) * rinv_e
+        m = tl.maximum(m, logit_e)
+    p = tl.where(sm, tl.exp(logit - m), 0.0)
+    l = tl.sum(p, 0)
+    acc = tl.sum((p * rinv)[:, None] * x, 0)
+    if HAS_EXTRA:
+        pe = tl.exp(logit_e - m)
+        l += pe
+        acc += (pe * rinv_e) * xe
+    return acc / l
 
 
 @triton.jit
@@ -349,7 +352,8 @@ def _post_attn_kernel(
         resid = tl.load(Src + part_slot * src_stride_s + t * src_stride_t + h, mask=hm, other=0.0).to(tl.float32) + a
     tl.store(Resid + t * H + h, resid, mask=hm)
     q = tl.load(Q + h, mask=hm, other=0.0)
-    o = _depth_attn_row(Src, src_stride_s, t * src_stride_t, ns, Resid, t * H, True, q, hm, H, BH, eps)
+    o = _depth_attn_row(Src, src_stride_s, t * src_stride_t, ns, Resid, t * H, True, q, hm, H, BH, eps,
+                        xe_reg=tl.where(hm, resid, 0.0), EXTRA_REG=True)
     if NORM:
         o = o * _rms_inv(tl.sum(o * o, 0), H, eps) * tl.load(Wn + h, mask=hm, other=0.0).to(tl.float32)
         tl.store(Out + t * out_stride_t + h, o.to(tl.bfloat16), mask=hm)
