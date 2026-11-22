@@ -12,7 +12,7 @@ path is a small set of fused Triton kernels captured in CUDA graphs, with DSpark
 | Correctness | state handling (KV cache, sliding ring, conv states, loop passes) bit-exact in an fp64 check; logits within bf16 noise of transformers; greedy speculative output equal to plain greedy when verify and decode run the same kernels |
 | Decode | fused per-token kernels, one CUDA graph per step; NVFP4 experts decoded with the hardware `cvt.e2m1x2`; grouped expert GEMMs for multi-token steps |
 | Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences; greedy (longest matching prefix) and sampled requests (speculative rejection sampling, exact for the target distribution: 220 vs 160 tok/s at temperature 1) |
-| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, stop sequences, logprobs, presence / frequency / repetition penalties, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests with interleaved chunked prefill; speculation for a lone request in any slot and, when it pays, for batched steps (one drafter pass for all slots, slot-independent verify graphs, adaptive choice from calibrated costs) |
+| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, stop sequences, logprobs, presence / frequency / repetition penalties, structured output (`response_format` JSON object / JSON schema via xgrammar), prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests with interleaved chunked prefill; speculation for a lone request in any slot and, when it pays, for batched steps (one drafter pass for all slots, slot-independent verify graphs, adaptive choice from calibrated costs) |
 | Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head, FP8 GEMMs for their prefill (faster, not bit-faithful to the bf16 checkpoint; GSM8K unchanged); `fp4_prefill`: NVFP4 activations and FP4 tensor cores (`tl.dot_scaled`) for the prefill expert GEMMs, as SGLang / vLLM do on this model (+24% 8k prefill on the proxy, GSM8K unchanged, DSpark acceptance slightly lower) |
 | Images | transformers' vision tower + processor; features spliced at the image placeholders. Greedy output on an image prompt equals transformers' for 40/40 tokens (`tests/gpu/vision_check.py`) |
 | Long context | `kv_fp8`: E4M3 cache for the full-attention layers; 256k context fits in 32 GiB (25.3 GiB after start-up), 123 tok/s DSpark decode at 131k |
@@ -74,13 +74,16 @@ bench/             SGLang baseline results and a survey of other Inkling 2 engin
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
 pip install triton==3.6.0   # newer than torch's pin; needed only for --fp4-prefill
-pip install safetensors tokenizers transformers fastapi uvicorn pillow
+pip install safetensors tokenizers transformers fastapi uvicorn pillow xgrammar   # xgrammar: response_format only
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark, 4 slots x 32k
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144 --slots 1 --no-vision
 curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json'   -d '{"messages": [{"role": "user", "content": "Hello!"}], "reasoning_effort": "low"}'
 ```
 
-Requests that ask for `logprobs` or set a penalty decode without speculation (the logprobs come from the plain decode step's logits:
+In chat, `response_format` constrains the answer section: the model reasons freely, and from its
+`<|content_text|>` marker every token is masked to the JSON grammar or schema until the answer closes.
+
+Requests that ask for `logprobs`, set a penalty or a `response_format` decode without speculation (the logprobs come from the plain decode step's logits:
 the model's distribution before temperature / top-p).
 
 Requests without a `temperature` use the checkpoint's `generation_config.json` (sampling at temperature 1.0, the

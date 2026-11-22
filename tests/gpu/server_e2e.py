@@ -193,5 +193,28 @@ plain = requests.post(B + "/completions", json=body).json()["choices"][0]["text"
 pen = requests.post(B + "/completions", json={**body, "frequency_penalty": 2.0}).json()["choices"][0]["text"]
 print("penalty:", repr(plain[:60]), "->", repr(pen[:60]))
 ok &= pen.count("la") < plain.count("la") or plain.count("la") == 0
+# structured output: a JSON schema in chat (after the reasoning), json_object on a raw completion
+schema = {"type": "object", "properties": {"city": {"type": "string"}, "population_millions": {"type": "number"}},
+          "required": ["city", "population_millions"], "additionalProperties": False}
+r = requests.post(B + "/chat/completions", json={
+    "messages": [{"role": "user", "content": "What is the largest city in Japan? Answer as JSON."}],
+    "max_tokens": 600, "temperature": 0, "reasoning_effort": "low",
+    "response_format": {"type": "json_schema", "json_schema": {"name": "city", "schema": schema}}}).json()
+content = r["choices"][0]["message"]["content"]
+print("json_schema:", repr(content), r["choices"][0]["finish_reason"])
+try:
+    obj = json.loads(content)
+    ok &= set(obj) == {"city", "population_millions"} and isinstance(obj["city"], str)
+except (TypeError, ValueError):
+    ok = False
+r = requests.post(B + "/completions", json={"prompt": "A JSON object describing a cat:", "max_tokens": 120,
+                                            "temperature": 0, "response_format": {"type": "json_object"}}).json()
+print("json_object:", repr(r["choices"][0]["text"][:200]))
+try:
+    ok &= isinstance(json.loads(r["choices"][0]["text"]), dict)
+except ValueError:
+    ok = False
+bad = requests.post(B + "/completions", json={"prompt": "x", "response_format": {"type": "yaml"}})
+ok &= bad.status_code == 400
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

@@ -35,6 +35,7 @@ image = (
         "pillow",
         "uvicorn",
         "requests",
+        "xgrammar==0.2.8",
         f"transformers @ git+https://github.com/huggingface/transformers.git@{TRANSFORMERS_SHA}",
     )
 )

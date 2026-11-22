@@ -195,6 +195,8 @@ class Server:
 
         self.engine, self.tok, self.model_id = engine, tokenizer, model_id
         self.defaults = dict(defaults or {})
+        self._grammar = None
+
         self.sched = Scheduler(engine)  # continuous batching over engine.slots
         self.stop_ids = {engine.cfg.eos_token_id}
         for t in ("<|content_model_end_sampling|>",):
@@ -203,6 +205,17 @@ class Server:
                 self.stop_ids.add(tid)
 
     # --------------------------------------------------------------- requests
+    def constraint(self, body: dict, chat: bool = True):
+        """A grammar constraint for the request's response_format, or None. Raises ValueError if unsupported."""
+        rf = body.get("response_format")
+        if not rf or rf.get("type", "text") == "text":
+            return None
+        if self._grammar is None:
+            from .grammar import GrammarBackend
+
+            self._grammar = GrammarBackend(self.tok, self.engine.cfg.unpadded_vocab_size)
+        return self._grammar.constraint(self._grammar.compile(rf), from_start=not chat)
+
     def chat_ids(self, body: dict):
         """(input ids, image features or None) of a chat request."""
         kwargs = dict(body.get("chat_template_kwargs") or {})
@@ -297,7 +310,7 @@ def build_app(server: Server):
     async def health():
         return {"ok": True}
 
-    async def generate(ids, body, chat: bool, image_feats=None):
+    async def generate(ids, body, chat: bool, image_feats=None, constraint=None):
         rid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         created = int(time.time())
         loop = asyncio.get_running_loop()
@@ -317,7 +330,7 @@ def build_app(server: Server):
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
         n_lp = requested_logprobs(body, chat)
         req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats,
-                                  logprobs=n_lp)
+                                  logprobs=n_lp, constraint=constraint)
         lp_sent = 0
 
         def new_lps():  # logprob entries of the tokens consumed since the last delta
@@ -353,7 +366,7 @@ def build_app(server: Server):
                 if stopped:
                     continue  # tokens generated before the cancel reached the scheduler
                 toks.append(item)
-                text = tok.decode(toks, skip_special_tokens=False)
+                text = tok.decode(toks, skip_special_tokens=not chat)  # chat: the splitter reads the markers
                 end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
                 if stops:
                     lo = max(0, emitted - hold)
@@ -394,13 +407,18 @@ def build_app(server: Server):
                                                       f"{server.engine.max_ctx} tokens (--max-ctx)",
                                            "type": "invalid_request_error", "code": "context_length_exceeded"}},
                                 status_code=400)
+        try:  # compiling a grammar can take a moment: off the event loop
+            constraint = await asyncio.get_running_loop().run_in_executor(None, server.constraint, body, chat)
+        except Exception as e:  # noqa: BLE001 (unsupported type, invalid schema)
+            return JSONResponse({"error": {"message": f"response_format: {e}", "type": "invalid_request_error"}},
+                                status_code=400)
         stream = bool(body.get("stream"))
         obj = "chat.completion" if chat else "text_completion"
         if stream:
             n_calls = [0]
 
             async def sse():
-                async for ev in generate(ids, body, chat, image_feats):
+                async for ev in generate(ids, body, chat, image_feats, constraint):
                     if ev[0] == "delta":
                         _, r, c, calls, lps = ev
                         if not (r or c or calls or lps):
@@ -430,7 +448,7 @@ def build_app(server: Server):
             return StreamingResponse(sse(), media_type="text/event-stream")
         reasoning, content, calls, lps = [], [], [], None
         final = None
-        async for ev in generate(ids, body, chat, image_feats):
+        async for ev in generate(ids, body, chat, image_feats, constraint):
             if ev[0] == "delta":
                 reasoning.append(ev[1])
                 content.append(ev[2])

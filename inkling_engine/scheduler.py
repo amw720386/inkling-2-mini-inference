@@ -42,6 +42,7 @@ class Request:
     image_feats: object = None
     logprobs: int | None = None  # report each token's logprob and this many alternatives (no speculation)
     lp: list = field(default_factory=list)  # per output token: (logprob, [(id, logprob), ...])
+    constraint: object = None  # grammar.JsonConstraint for structured output (no speculation)
 
 
 def token_logprobs(logits: torch.Tensor, tok: int, k: int):
@@ -70,9 +71,10 @@ class Scheduler:
         self.thread.start()
 
     # ------------------------------------------------------------------ API
-    def submit(self, ids, max_new, stop, sp: Sampling, on_token, image_feats=None, logprobs: int | None = None
-               ) -> Request:
-        req = Request(list(ids), max_new, set(stop), sp, on_token, image_feats=image_feats, logprobs=logprobs)
+    def submit(self, ids, max_new, stop, sp: Sampling, on_token, image_feats=None, logprobs: int | None = None,
+               constraint=None) -> Request:
+        req = Request(list(ids), max_new, set(stop), sp, on_token, image_feats=image_feats, logprobs=logprobs,
+                      constraint=constraint)
         self.inbox.put(req)
         return req
 
@@ -183,15 +185,28 @@ class Scheduler:
         e = self.e
         if req.sp.seed is not None and e.drafter is not None:
             e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
-        tok = sample(apply_penalties(logits, req.sp, req.ids, []) if req.sp.penalized else logits, req.sp, req.gen)
+        tok = self._pick(req, logits)
         if req.logprobs is not None:
             req.lp.append(token_logprobs(logits, tok, req.logprobs))
         req.stats.prefill_s = time.time() - req.t_start
-        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec and req.logprobs is None and not req.sp.penalized
+        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec and not self._plain_only(req)
         req.t_decode = time.time()
         self.active[req.slot] = req
         req.on_token(tok)
         self._check_done(req)
+
+    @staticmethod
+    def _plain_only(req: Request) -> bool:
+        """Requests whose tokens need per-step logits processing decode without speculation."""
+        return req.logprobs is not None or req.sp.penalized or req.constraint is not None
+
+    @staticmethod
+    def _pick(req: Request, logits: torch.Tensor) -> int:
+        """Sample one token from a logits row: penalties, then the grammar constraint, then sampling."""
+        row = apply_penalties(logits, req.sp, req.ids, req.out) if req.sp.penalized else logits
+        if req.constraint is not None:
+            return req.constraint.pick(row, lambda r: sample(r, req.sp, req.gen))
+        return sample(row, req.sp, req.gen)
 
     def _check_done(self, req: Request) -> bool:
         if req.out[-1] in req.stop or len(req.out) >= req.max_new or req.cancel.is_set():
@@ -248,15 +263,12 @@ class Scheduler:
             for i, r in enumerate(reqs):
                 if r.spec_ok:
                     e.drafter.commit(g.ws.taps[i:i + 1], r.P, slot=r.slot)
-        greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0 and not r.sp.penalized]
+        greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0 and not r.sp.penalized
+                  and r.constraint is None]
         picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}  # one sync
         for i, r in enumerate(reqs):
             r.P += 1
-            if i in picks:
-                t = picks[i]
-            else:
-                row = apply_penalties(lg[i], r.sp, r.ids, r.out) if r.sp.penalized else lg[i]
-                t = sample(row, r.sp, r.gen)
+            t = picks[i] if i in picks else self._pick(r, lg[i])
             if r.logprobs is not None:
                 r.lp.append(token_logprobs(lg[i], t, r.logprobs))
             r.out.append(t)
