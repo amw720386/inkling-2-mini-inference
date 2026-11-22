@@ -80,6 +80,9 @@ python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-c
 curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json'   -d '{"messages": [{"role": "user", "content": "Hello!"}], "reasoning_effort": "low"}'
 ```
 
+Requests without a `temperature` use the checkpoint's `generation_config.json` (sampling at temperature 1.0, the
+model's default, as SGLang does); `--default-temperature 0` makes greedy the default instead.
+
 Options: `--dense-fp8` (FP8 attention projections and LM head, faster, not bit-faithful), `--fp4-prefill` (NVFP4
 activations on the FP4 tensor cores for prefill expert GEMMs, Triton >= 3.6), `--kv-fp8` (FP8 cache for
 the full-attention layers), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and

@@ -173,11 +173,28 @@ def tool_call_obj(name, args, index):
             "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
 
 
+def generation_defaults(model_dir: str) -> dict:
+    """Sampling defaults from the checkpoint's generation_config.json (Inkling-2-Mini: do_sample, temperature 1.0),
+    used for requests that do not set them, as SGLang / transformers do."""
+    import os
+
+    try:
+        with open(os.path.join(model_dir, "generation_config.json"), encoding="utf-8") as f:
+            g = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not g.get("do_sample", False):
+        return {"temperature": 0.0}
+    return {k: g[k] for k in ("temperature", "top_p", "top_k") if k in g}
+
+
 class Server:
-    def __init__(self, engine, tokenizer, model_id: str):
+    def __init__(self, engine, tokenizer, model_id: str, defaults: dict | None = None):
+        """defaults: sampling parameters for requests that omit them (default: greedy)."""
         from .scheduler import Scheduler
 
         self.engine, self.tok, self.model_id = engine, tokenizer, model_id
+        self.defaults = dict(defaults or {})
         self.sched = Scheduler(engine)  # continuous batching over engine.slots
         self.stop_ids = {engine.cfg.eos_token_id}
         for t in ("<|content_model_end_sampling|>",):
@@ -200,12 +217,13 @@ class Server:
                                            add_generation_prompt=True, return_dict=True, **kwargs)
         return [int(i) for i in enc["input_ids"]], None
 
-    @staticmethod
-    def sampling(body: dict):
+    def sampling(self, body: dict):
         from .engine import Sampling
 
-        return Sampling(temperature=float(body.get("temperature", 0.0) or 0.0), top_p=float(body.get("top_p", 1.0)),
-                        top_k=int(body.get("top_k", 0) or 0), seed=body.get("seed"))
+        d = self.defaults
+        pick = lambda k, dv: body[k] if body.get(k) is not None else d.get(k, dv)  # noqa: E731
+        return Sampling(temperature=float(pick("temperature", 0.0) or 0.0), top_p=float(pick("top_p", 1.0)),
+                        top_k=int(pick("top_k", 0) or 0), seed=body.get("seed"))
 
     def run(self, ids, body, on_token):
         """Generate under the lock, calling on_token(token_id) per token. Returns (tokens, stats)."""
@@ -410,6 +428,8 @@ def main():
                     help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6)")
     ap.add_argument("--no-vision", action="store_true", help="text only (skips loading the 0.6 GB vision tower)")
     ap.add_argument("--model-id", default="inkling-2-mini")
+    ap.add_argument("--default-temperature", type=float, default=None,
+                    help="temperature for requests without one (default: the checkpoint's generation_config, 1.0)")
     a = ap.parse_args()
     from transformers import AutoTokenizer
 
@@ -421,7 +441,10 @@ def main():
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
                  kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision,
                  fp4_prefill=a.fp4_prefill or None)
-    uvicorn.run(build_app(Server(eng, tok, a.model_id)), host=a.host, port=a.port, log_level="info")
+    defaults = generation_defaults(a.model)
+    if a.default_temperature is not None:
+        defaults["temperature"] = a.default_temperature
+    uvicorn.run(build_app(Server(eng, tok, a.model_id, defaults)), host=a.host, port=a.port, log_level="info")
 
 
 if __name__ == "__main__":
