@@ -80,12 +80,16 @@ class VerifyGraph:
 
 class Engine:
     def __init__(self, model_dir: str, max_ctx: int = 32768, spec: bool = True, spec_threshold: float = 0.8,
-                 prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False, kv_fp8: bool = False):
+                 prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False, kv_fp8: bool = False,
+                 slots: int = 1):
+        """slots: concurrent sequences (cache slots and batched decode graphs 1..slots). Speculation and prefix
+        reuse apply to slot 0, which the scheduler gives to a request running alone."""
+        self.slots = slots
         self.cfg = InklingConfig.from_pretrained(model_dir)
         self.w = load_weights(self.cfg, model_dir)
         ring = self.cfg.sliding_window + 64
         kv_dtype = torch.float8_e4m3fn if kv_fp8 else torch.bfloat16
-        self.cache = InklingCache(self.cfg, CacheSpec(slots=1, max_ctx=max_ctx + 16, ring=ring, kv_dtype=kv_dtype))
+        self.cache = InklingCache(self.cfg, CacheSpec(slots=slots, max_ctx=max_ctx + 16, ring=ring, kv_dtype=kv_dtype))
         self.model = FusedModel(self.cfg, self.w, dense_fp8=dense_fp8)
         self.prefill_chunk = prefill_chunk
         self.pws = self.model.workspace(prefill_chunk, 1)
@@ -98,11 +102,12 @@ class Engine:
             self.model.write_taps = True
             self.cache.enable_spec(max(VERIFY_WIDTHS))
             self.drafter = Drafter(model_dir, self.w, max_ctx)
-        self.decode_graph = FusedDecodeGraph(self.model, self.cache, 1, capture=graphs)
+        self.decode_graphs = {bs: FusedDecodeGraph(self.model, self.cache, bs, capture=graphs)
+                              for bs in range(1, slots + 1)}
+        self.decode_graph = self.decode_graphs[1]
         self.verify = {m: VerifyGraph(self.model, self.cache, m) for m in VERIFY_WIDTHS} if spec and graphs else {}
         if spec and graphs:
             self.drafter.capture()
-        self.gamma = 2.0
         self.gamma = 2.0
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
@@ -160,6 +165,18 @@ class Engine:
         self.gamma = min(8.0, max(0.5, self.gamma - 0.05 * err))
 
     # ------------------------------------------------------------------ prefill
+    @torch.inference_mode()
+    def prefill_slot(self, slot: int, ids: list[int]) -> torch.Tensor:
+        """Fresh prefill of `ids` into a non-zero slot (no reuse, no drafter context). Returns last logits."""
+        assert slot != 0
+        self.cache.reset_slot(slot)
+        logits = None
+        for s in range(0, len(ids), self.prefill_chunk):
+            part = ids[s:s + self.prefill_chunk]
+            b = Batch.build([SeqChunk(slot, s, len(part), "last")], [part])
+            logits = self.model.forward(b, self.cache, self.pws)
+        return logits[-1]
+
     # ----------------------------------------------------------- prefix reuse
     def _snapshot(self, ids: list[int]):
         """State at the end of a prompt: conv states, sliding rings and the drafter's rings. Global KV is
@@ -264,30 +281,9 @@ class Engine:
                     out.append(t)
                     yield t
                     continue
-                drafts, conf = self.drafter.draft(out[-1], P, max(sp.temperature, 0.0))
-                info = torch.cat([conf, drafts.float()]).tolist()  # one sync
-                confs, drafted = info[:7], [int(d) for d in info[7:]]
-                m = self._pick_width(confs)
-                vt = self.verify_tokens[m]
-                vt[0] = out[-1]
-                vt[1:].copy_(drafts[:m - 1])
-                logits, taps = self.verify[m].run(vt, P)
-                if sp.temperature <= 0:
-                    target = logits.argmax(-1)
-                    acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
-                    acc, *tgt = torch.cat([acc_t, target.int()]).tolist()  # one sync
-                else:
-                    acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
-                    tgt = [0] * acc + [nxt]
-                commit = acc + 1
-                self._observe(confs, m, acc)
-                self.cache.commit_spec(0, commit)
-                self.drafter.commit(taps[:commit], P)
+                new, commit = self.spec_round(out[-1], P, sp, gen, st)
                 P += commit
-                st.rounds += 1
-                st.accepted += acc
-                st.widths[m] = st.widths.get(m, 0) + 1
-                for t in drafted[:acc] + [tgt[acc]]:
+                for t in new:
                     out.append(t)
                     yield t
                     if t in stop or len(out) >= max_new:
@@ -298,6 +294,34 @@ class Engine:
             torch.cuda.synchronize()
             st.decode_s = time.time() - t0
             st.generated = len(out)
+
+    def spec_round(self, anchor: int, P: int, sp: Sampling, gen, st: "GenStats | None" = None) -> tuple[list[int], int]:
+        """One DSpark round for the sequence in slot 0 whose anchor (sampled, not yet processed) is at P.
+        Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
+        drafts, conf = self.drafter.draft(anchor, P, max(sp.temperature, 0.0))
+        info = torch.cat([conf, drafts.float()]).tolist()  # one sync
+        confs, drafted = info[:7], [int(d) for d in info[7:]]
+        m = self._pick_width(confs)
+        vt = self.verify_tokens[m]
+        vt[0] = anchor
+        vt[1:].copy_(drafts[:m - 1])
+        logits, taps = self.verify[m].run(vt, P)
+        if sp.temperature <= 0:
+            target = logits.argmax(-1)
+            acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
+            acc, *tgt = torch.cat([acc_t, target.int()]).tolist()  # one sync
+            nxt = tgt[acc]
+        else:
+            acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
+        commit = acc + 1
+        self._observe(confs, m, acc)
+        self.cache.commit_spec(0, commit)
+        self.drafter.commit(taps[:commit], P)
+        if st is not None:
+            st.rounds += 1
+            st.accepted += acc
+            st.widths[m] = st.widths.get(m, 0) + 1
+        return drafted[:acc] + [nxt], commit
 
     def _accept_sampled(self, drafts, target_logits, sp, gen):
         cand, q = self.drafter.draft_distribution(drafts.shape[0], sp.temperature)

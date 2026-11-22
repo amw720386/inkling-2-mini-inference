@@ -1,4 +1,4 @@
-"""OpenAI-compatible HTTP server for the engine (one request at a time; requests queue on a lock).
+"""OpenAI-compatible HTTP server for the engine (continuous batching over --slots concurrent requests).
 
   python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000 [--no-spec] [--dense-fp8]
 
@@ -60,8 +60,10 @@ class Splitter:
 
 class Server:
     def __init__(self, engine, tokenizer, model_id: str):
+        from .scheduler import Scheduler
+
         self.engine, self.tok, self.model_id = engine, tokenizer, model_id
-        self.lock = threading.Lock()
+        self.sched = Scheduler(engine)  # continuous batching over engine.slots
         self.stop_ids = {engine.cfg.eos_token_id}
         for t in ("<|content_model_end_sampling|>",):
             tid = tokenizer.convert_tokens_to_ids(t)
@@ -86,16 +88,19 @@ class Server:
 
     def run(self, ids, body, on_token):
         """Generate under the lock, calling on_token(token_id) per token. Returns (tokens, stats)."""
-        from .engine import GenStats
-
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
-        st = GenStats()
         out = []
-        with self.lock:
-            for t in self.engine.stream(ids, max_new, self.stop_ids, self.sampling(body), stats=st):
+
+        def cb(t):
+            if t is not None:
                 out.append(t)
                 on_token(t)
-        return out, st
+
+        req = self.sched.submit(ids, max_new, self.stop_ids, self.sampling(body), cb)
+        req.done.wait()
+        if req.error is not None:
+            raise req.error
+        return out, req.stats
 
     def usage(self, ids, out, st):
         return {"prompt_tokens": len(ids), "completion_tokens": len(out), "total_tokens": len(ids) + len(out),
@@ -231,7 +236,8 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--max-ctx", type=int, default=65536)
+    ap.add_argument("--max-ctx", type=int, default=32768)
+    ap.add_argument("--slots", type=int, default=4, help="concurrent requests (batched decode)")
     ap.add_argument("--no-spec", action="store_true")
     ap.add_argument("--dense-fp8", action="store_true")
     ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
@@ -245,7 +251,7 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(a.model)
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
-                 kv_fp8=a.kv_fp8)
+                 kv_fp8=a.kv_fp8, slots=a.slots)
     uvicorn.run(build_app(Server(eng, tok, a.model_id)), host=a.host, port=a.port, log_level="info")
 
 
