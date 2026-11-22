@@ -17,7 +17,8 @@ from inkling_engine.batch import SeqChunk  # noqa: E402
 from inkling_engine.ops import attn_triton  # noqa: E402
 
 H, KVH, D, R, W = 24, 8, 128, 1024, 1024
-T, START = 2048, 6144
+T = int(sys.argv[2]) if len(sys.argv) > 2 else 2048  # new tokens (1 = decode)
+START = int(sys.argv[3]) if len(sys.argv) > 3 else 6144  # cached positions before them
 
 BIAS = "        bias = tl.load(Rel + t_glob[:, None] * rel_stride_t + head[:, None] * R + dist, mask=in_rel, other=0.0)\n"
 GATHER = """        d0 = start + q0 - (kmin + b * BN)
@@ -77,12 +78,18 @@ def variant(name):
 
 
 def timed(fn, reps=20):
+    """Per-call time of fn replayed in a CUDA graph (no Python launch overhead, as in the engine)."""
     fn()
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(reps):
+            fn()
+    g.replay()
     torch.cuda.synchronize()
     e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     e0.record()
-    for _ in range(reps):
-        fn()
+    g.replay()
     e1.record()
     torch.cuda.synchronize()
     return e0.elapsed_time(e1) / reps
@@ -105,7 +112,11 @@ for kind, cap, ring, window in (("local", W + 64, W + 64, W), ("global", START +
     for name in ABLATIONS:
         mod = variant(name)
         for tok in (32,):
-            meta = mod.AttnMeta.build(seqs, [0], tok_per_tile=tok, n_split=1)
+            from inkling_engine.fast import pick_splits  # noqa: E402
+
+            tok = 4 if T <= 4 else (8 if T <= 8 else (16 if T <= 256 else 32))  # as build_step_meta
+            nl, ng = pick_splits(START + T, (T + tok - 1) // tok, KVH, torch.cuda.get_device_properties(0).multi_processor_count, W)
+            meta = mod.AttnMeta.build(seqs, [0], tok_per_tile=tok, n_split=nl if window else ng)
             if name == "gather":
                 fn = lambda: mod.inkling_attention(q, kn, vn, kc, vc, rstate, sinks, gate, meta, window=window,
                                                    ring=ring, scale=D ** -0.5, proj=proj)
@@ -118,4 +129,6 @@ for kind, cap, ring, window in (("local", W + 64, W + 64, W), ("global", START +
             elif name == "gather":
                 print("  gather vs table rel err", ((out - ref_out).norm() / ref_out.norm()).item())
             ms = timed(fn)
-            print(f"{kind:6s} {name:15s} tok {tok:3d}: {ms * 1000:7.1f} us  {flops / ms / 1e9:6.1f} TFLOP/s")
+            kv_bytes = 2 * min(keys, START + T) * KVH * D * 2
+            print(f"{kind:6s} {name:15s} tok {tok:3d} splits {meta.n_split:2d}: {ms * 1000:7.1f} us  "
+                  f"{flops / ms / 1e9:6.1f} TFLOP/s  {kv_bytes / ms / 1e6:6.0f} GB/s K/V")

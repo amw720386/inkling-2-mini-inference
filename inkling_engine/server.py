@@ -310,6 +310,24 @@ def build_app(server: Server):
     async def health():
         return {"ok": True}
 
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus text format: finished-request totals, queue gauges, scheduler step counts and time."""
+        from fastapi.responses import PlainTextResponse
+
+        sc = server.sched
+        lines = []
+        for k, v in sc.totals.items():
+            lines += [f"# TYPE inkling_{k}_total counter", f"inkling_{k}_total {v}"]
+        for k, v in (("active", len(sc.active)), ("prefilling", len(sc.prefilling)), ("waiting", len(sc.waiting))):
+            lines += [f"# TYPE inkling_requests_{k} gauge", f"inkling_requests_{k} {v}"]
+        lines.append("# TYPE inkling_steps_total counter")
+        lines.append("# TYPE inkling_step_seconds_total counter")
+        for kind in ("spec", "batched_spec", "batched", "prefill"):
+            n, secs = sc.counters[kind]
+            lines += [f'inkling_steps_total{{kind="{kind}"}} {n}', f'inkling_step_seconds_total{{kind="{kind}"}} {secs:.6f}']
+        return PlainTextResponse("\n".join(lines) + "\n")
+
     async def generate(ids, body, chat: bool, image_feats=None, constraint=None):
         rid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         created = int(time.time())

@@ -65,6 +65,8 @@ class Scheduler:
         self.prefilling: list[Request] = []  # slot assigned, prompt being processed chunk by chunk
         self.active: dict[int, Request] = {}
         self.batched_spec = True  # speculate in batched steps too (each request drafts in its slot)
+        self.totals = {"requests": 0, "errors": 0, "prompt_tokens": 0, "cached_tokens": 0, "generated_tokens": 0,
+                       "spec_rounds": 0, "spec_accepted": 0}  # finished requests (served at /metrics)
         self.counters = {"spec": [0, 0.0], "batched_spec": [0, 0.0], "batched": [0, 0.0], "prefill": [0, 0.0],
                          "batch_sizes": {}}
         self.thread = threading.Thread(target=self._loop, daemon=True, name="inkling-scheduler")
@@ -147,6 +149,7 @@ class Scheduler:
 
     def _fail(self, req: Request, exc: Exception):
         req.error = exc
+        self.totals["errors"] += 1
         if req in self.prefilling:
             self.prefilling.remove(req)
         self.active.pop(req.slot, None)
@@ -219,6 +222,14 @@ class Scheduler:
     def _finish(self, req: Request):
         st = req.stats
         st.generated = len(req.out)
+        t = self.totals
+        t["requests"] += 1
+        t["errors"] += req.error is not None
+        t["prompt_tokens"] += len(req.ids)
+        t["cached_tokens"] += st.reused_tokens
+        t["generated_tokens"] += st.generated
+        t["spec_rounds"] += st.rounds
+        t["spec_accepted"] += st.accepted
         st.decode_s = time.time() - req.t_decode if req.t_decode else 0.0
         if req.slot >= 0:
             self.e.slot_ids[req.slot] = (req.ids + req.out)[:req.P]

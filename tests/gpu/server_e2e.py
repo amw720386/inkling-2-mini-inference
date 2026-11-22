@@ -243,5 +243,8 @@ for k, v in convs.items():
     cached = res[k]["usage"]["prompt_tokens_details"]["cached_tokens"]
     print(f"multi-slot reuse [{k}]: {ans!r} cached {cached}")
     ok &= v[2] in ans.lower() and cached > 0
+m = requests.get("http://127.0.0.1:8011/metrics").text
+print("metrics:", [l for l in m.splitlines() if l.startswith("inkling_requests_total") or "generated" in l])
+ok &= "inkling_requests_total" in m and "inkling_generated_tokens_total" in m
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
