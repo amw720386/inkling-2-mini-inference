@@ -54,6 +54,49 @@ class GenStats:
         return self.generated / self.decode_s if self.decode_s else 0.0
 
 
+CHUNK_GRAPH_MAX = 32  # prefill chunks up to this many tokens replay a captured graph
+
+
+class ChunkGraph:
+    """Captured prefill of one n-token chunk (n <= CHUNK_GRAPH_MAX) of a sequence in any slot at any start,
+    committing its state like the eager path. Eager prefill launches ~800 kernels, so short prompts were bound by
+    launch latency (an 8-token prompt took 21 ms, the same work replays in ~8 ms). All chunk graphs share one
+    workspace (they never run concurrently)."""
+
+    def __init__(self, model: FusedModel, cache: InklingCache, n: int, ws, pool=None):
+        self.model, self.cache, self.n, self.ws = model, cache, n, ws
+        seqs = [SeqChunk(slot=0, start=0, n=n, want_logits="last")]
+        self.batch = Batch(seqs=seqs, input_ids=torch.zeros(n, dtype=torch.int64, device="cuda"),
+                           positions=torch.arange(n, dtype=torch.int64, device="cuda"), offsets=[0],
+                           logit_rows=torch.full((1,), n - 1, dtype=torch.int64, device="cuda"))
+        self.meta = build_step_meta(self.batch, 4, 16)
+        self.base_pos = torch.arange(n, dtype=torch.int64, device="cuda")
+        snap = [(x, x[:, 0].clone()) for x in (cache.k_conv, cache.v_conv, cache.attn_conv, cache.mlp_conv)]
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                self._run()
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, pool=pool):
+            self.logits = self._run()
+        for x, v in snap:
+            x[:, 0].copy_(v)
+
+    def _run(self):
+        return self.model.forward(self.batch, self.cache, self.ws, self.meta)
+
+    def run(self, tokens: list[int], slot: int, start: int):
+        """Returns (last-row logits [1, V], taps [n, 4, H]) views into the shared workspace."""
+        self.batch.input_ids.copy_(torch.tensor(tokens, dtype=torch.int64), non_blocking=True)
+        torch.add(self.base_pos, start, out=self.batch.positions)
+        self.meta.local.seq_slot.fill_(slot)
+        self.meta.local.seq_start.fill_(start)
+        self.graph.replay()
+        return self.logits, self.ws.taps[:self.n]
+
+
 class VerifyGraph:
     """Captured target forward of k sequences, each its anchor + (m - 1) drafts, in any slots: all rows'
     logits and taps. Conv-state candidates go to cache.cand at batch positions 0..k-1."""
@@ -132,6 +175,11 @@ class Engine:
         self.decode_graph = self.decode_graphs[1]
         self.verify = ({(k, m): VerifyGraph(self.model, self.cache, k, m, pool=self.pool) for k in range(1, slots + 1)
                         for m in VERIFY_WIDTHS} if spec and graphs else {})
+        self.chunk_graphs = {}
+        if graphs:
+            self.cws = self.model.workspace(CHUNK_GRAPH_MAX, 1, 16)
+            self.chunk_graphs = {n: ChunkGraph(self.model, self.cache, n, self.cws, pool=self.pool)
+                                 for n in range(1, CHUNK_GRAPH_MAX + 1)}
         if spec and graphs:
             self.drafter.capture(self.pool)
         self.gamma = 2.0
@@ -303,9 +351,14 @@ class Engine:
                 sel = ((img >= s) & (img < s + len(part))).nonzero()[:, 0]
                 if len(sel):
                     ef = ((img[sel] - s).to(self.pws.blk.device), image_feats[sel.to(image_feats.device)])
-            logits = self.model.forward(b, self.cache, self.pws, embed_feats=ef)
+            cg = self.chunk_graphs.get(len(part)) if ef is None else None
+            if cg is not None:
+                logits, taps = cg.run(part, slot, s)
+            else:
+                logits = self.model.forward(b, self.cache, self.pws, embed_feats=ef)
+                taps = self.pws.taps[:len(part)]
             if self.drafter is not None:
-                self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
+                self.drafter.commit(taps, s, slot=slot)
             if s + self.prefill_chunk < len(ids):
                 yield
         self.slot_ids[slot] = list(ids)

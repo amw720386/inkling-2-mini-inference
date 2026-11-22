@@ -86,6 +86,12 @@ across waves.
 
 ## Prefill
 
+Short prompts (`tests/gpu/bench_ttft.py`): eager prefill launches ~800 kernels, so a prompt of up to ~48 tokens took
+~21 ms regardless of length (launch-bound). Chunks of up to 32 tokens now replay a captured graph (one per size,
+slot- and position-independent, sharing one workspace): 8 tokens 20.9 -> 10.9 ms, 24 tokens 21.3 -> 15.6 ms, 32
+tokens 21.3 -> 16.5 ms; same logits argmax and the same greedy continuation as eager. Beyond ~24 tokens a chunk
+already routes to most of the 128 experts, so prefill there is bound by expert weight reads, not launches.
+
 `fp4_prefill` (`--fp4-prefill`, needs Triton >= 3.6): multi-token steps quantize the expert inputs of the NVFP4
 layers (0-19) to NVFP4 (per-row outer scale, e4m3 scales per 16 values, 4-or-6 block-scale choice, as vLLM's sm_120
 path does) and run both expert GEMMs as `tl.dot_scaled` e2m1 x e2m1 on the FP4 tensor cores (the compiled kernel uses
