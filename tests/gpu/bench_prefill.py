@@ -41,7 +41,13 @@ dt = time.time() - t0
 print(f"prefill {n} tokens, chunk {chunk}: {dt * 1000:.0f} ms -> {n / dt:.0f} tok/s")
 from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
-with profile(activities=[ProfilerActivity.CUDA]) as prof:
+ops = len(sys.argv) > 4 and sys.argv[4] == "ops"  # per aten op and input shape instead of per kernel
+with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU] if ops else [ProfilerActivity.CUDA],
+             record_shapes=ops) as prof:
     run()
     torch.cuda.synchronize()
-print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=50))
+if ops:
+    print(prof.key_averages(group_by_input_shape=True).table(sort_by="self_cuda_time_total", row_limit=30,
+                                                             max_name_column_width=40, max_shapes_column_width=70))
+else:
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=50))

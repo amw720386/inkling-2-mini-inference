@@ -303,6 +303,71 @@ def _grouped_kernel(
         tl.store(Out + orow.to(tl.int64)[:, None] * out_stride + n[None, :], acc, mask=mmask[:, None] & nmask[None, :])
 
 
+@triton.jit
+def _hist_kernel(Ids, Counts, P, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = i < P
+    e = tl.load(Ids + i, mask=m, other=0)
+    tl.atomic_add(Counts + e, 1, mask=m)
+
+
+@triton.jit
+def _plan_kernel(Counts, Cursor, TileExpert, TileStart, TileEnd, BM: tl.constexpr, E: tl.constexpr,
+                 MAXT: tl.constexpr):
+    """Expert row ranges (prefix sums of Counts) and the tile list. Tile t of expert e covers sorted
+    rows [start_e + r * BM, min(start_e + (r + 1) * BM, end_e)); tiles past the last are empty (start = end)."""
+    ea = tl.arange(0, E)
+    counts = tl.load(Counts + ea)
+    ends = tl.cumsum(counts, 0)
+    starts = ends - counts
+    if tl.program_id(0) == 0:
+        tl.store(Cursor + ea, starts)
+    ntile = (counts + BM - 1) // BM
+    tend = tl.cumsum(ntile, 0)
+    tbeg = tend - ntile
+    t = tl.program_id(0) * MAXT + tl.arange(0, MAXT)
+    e_of = tl.sum((tend[None, :] <= t[:, None]).to(tl.int32), 1)  # expert owning tile t (E if none)
+    sel = ea[None, :] == e_of[:, None]
+    s_e = tl.sum(tl.where(sel, starts[None, :], 0), 1)
+    end_e = tl.sum(tl.where(sel, ends[None, :], 0), 1)
+    r = t - tl.sum(tl.where(sel, tbeg[None, :], 0), 1)
+    ok = e_of < E
+    st = s_e + r * BM
+    tl.store(TileExpert + t, tl.where(ok, e_of, 0))
+    tl.store(TileStart + t, tl.where(ok, st, 0))
+    tl.store(TileEnd + t, tl.where(ok, tl.minimum(st + BM, end_e), 0))
+
+
+@triton.jit
+def _scatter_kernel(Ids, Cursor, RowSrc, P, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = i < P
+    e = tl.load(Ids + i, mask=m, other=0)
+    pos = tl.atomic_add(Cursor + e, 1, mask=m)
+    tl.store(RowSrc + pos, i, mask=m)
+
+
+def plan_tiles(ids: torch.Tensor, n_experts: int, bm: int):
+    """Counting sort of the (token, k) pairs by expert, without a host sync. Returns (row_src [P] int32: sorted row ->
+    pair, tile_expert, tile_start, tile_end, n_tiles), n_tiles an upper bound (empty tiles exit at once). Rows of an
+    expert land in arbitrary order (atomics); each output row is independent of its tile mates, so results are not."""
+    flat = ids.reshape(-1).to(torch.int32)
+    p = flat.numel()
+    dev = ids.device
+    maxt = triton.next_power_of_2(triton.cdiv(p, bm) + n_experts)
+    counts = torch.zeros(n_experts, dtype=torch.int32, device=dev)
+    cursor = torch.empty(n_experts, dtype=torch.int32, device=dev)
+    tiles = torch.empty(3, maxt, dtype=torch.int32, device=dev)
+    row_src = torch.empty(p, dtype=torch.int32, device=dev)
+    blk = 1024
+    _hist_kernel[(triton.cdiv(p, blk),)](flat, counts, p, BLOCK=blk, num_warps=4)
+    per = min(maxt, 64)  # tiles per program
+    _plan_kernel[(maxt // per,)](counts, cursor, tiles[0], tiles[1], tiles[2], BM=bm, E=n_experts, MAXT=per,
+                                 num_warps=4)
+    _scatter_kernel[(triton.cdiv(p, blk),)](flat, cursor, row_src, p, BLOCK=blk, num_warps=4)
+    return row_src, tiles[0], tiles[1], tiles[2], maxt
+
+
 def moe_prefill(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: ExpertWeight, w2: ExpertWeight,
                 gate_cap: float, up_cap: float, bm: int = 64, rows_out: torch.Tensor | None = None) -> torch.Tensor:
     """Grouped path. Returns fp32 per-pair weighted rows [T*k, H] in (token, k) order (sum them per token)."""
@@ -310,18 +375,7 @@ def moe_prefill(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Expe
     k = ids.shape[1]
     e, n13, _ = w13.shape
     inter = n13 // 2
-    flat = ids.reshape(-1).long()
-    order = torch.argsort(flat, stable=True)
-    counts = torch.bincount(flat, minlength=e)
-    tiles_per = (counts + bm - 1) // bm
-    n_tiles = int(tiles_per.sum())
-    starts_e = torch.cumsum(counts, 0) - counts
-    tile_expert = torch.repeat_interleave(torch.arange(e, device=x.device), tiles_per)
-    tile_rank = torch.arange(n_tiles, device=x.device) - (torch.cumsum(tiles_per, 0) - tiles_per)[tile_expert]
-    tile_start = (starts_e[tile_expert] + tile_rank * bm).to(torch.int32)
-    tile_end = torch.minimum(tile_start + bm, (starts_e + counts)[tile_expert].to(torch.int32))
-    tile_expert = tile_expert.to(torch.int32)
-    row_src = order.to(torch.int32)  # sorted row -> (token, k) pair index
+    row_src, tile_expert, tile_start, tile_end, n_tiles = plan_tiles(ids, e, bm)
     wts_f = wts.reshape(-1).float().contiguous()
     act = torch.empty(t * k, inter, dtype=torch.bfloat16, device=x.device)
     rows = rows_out if rows_out is not None else torch.empty(t * k, hdim, dtype=torch.float32, device=x.device)

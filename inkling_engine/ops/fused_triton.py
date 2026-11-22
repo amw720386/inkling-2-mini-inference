@@ -437,11 +437,31 @@ def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.con
     tl.store(Wts + t * TOPK + ks, ws)
 
 
+@triton.jit
+def _router_gemm_kernel(X, x_stride, W, Out, T, K: tl.constexpr, E: tl.constexpr, BM: tl.constexpr,
+                        BK: tl.constexpr, BE: tl.constexpr = 0, PREC: tl.constexpr = "tf32x3"):
+    """Prefill router logits X @ W^T at about fp32 accuracy on the TF32 tensor cores (3xTF32 split products)."""
+    rows = tl.program_id(0) * BM + tl.arange(0, BM)
+    rm = rows < T
+    r64 = rows.to(tl.int64)
+    NE: tl.constexpr = BE if BE > 0 else E
+    e = tl.program_id(1) * NE + tl.arange(0, NE)
+    acc = tl.zeros((BM, NE), tl.float32)
+    for k0 in tl.range(0, K, BK):
+        kk = k0 + tl.arange(0, BK)
+        x = tl.load(X + r64[:, None] * x_stride + kk[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
+        w = tl.load(W + e[:, None] * K + kk[None, :])
+        acc = tl.dot(x, tl.trans(w), acc, input_precision=PREC)
+    tl.store(Out + r64[:, None] * E + e[None, :], acc, mask=rm[:, None])
+
+
 def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale, w_f32=None):
     t, h = x.shape
     e = w_bf16.shape[0]
-    if t >= PREFILL_GEMM_MIN_TOKENS and w_f32 is not None:
-        logits = x.float() @ w_f32.t()
+    if t >= PREFILL_GEMM_MIN_TOKENS and w_f32 is not None and x.dtype == torch.bfloat16:
+        logits = torch.empty(t, e, dtype=torch.float32, device=x.device)
+        _router_gemm_kernel[(triton.cdiv(t, 16), e // 64)](x, x.stride(0), w_f32, logits, t, K=h, E=e, BM=16,
+                                                           BK=64, BE=64, num_warps=4, num_stages=3)
         _topk_kernel[(t,)](logits, logits.stride(0), bias, ids, wts, E=e, TOPK=top_k, scale=scale, num_warps=4)
         return
     key = (x.device.index, logits_buf.data_ptr())
@@ -617,22 +637,87 @@ def _msg_norm_kernel(Tmp, tmp_stride_g, tmp_stride_t, SS, Wn, wn_stride, Out, ou
 PREFILL_GEMM_MIN_TOKENS = 64  # above this, the per-token kernels re-read their weights too often
 
 
-def _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w):
-    """Same math as the per-token kernels, as GEMMs (prefill)."""
+@triton.jit
+def _msg_prep_kernel(Hs, h_stride_t, Ms, m_stride_t, Cat, eps, H: tl.constexpr, BH: tl.constexpr):
+    """Prefill: cat[t] = [rmsnorm(h_t), rmsnorm(m_t)] (no weight), bf16 [T, 2H]."""
+    t = tl.program_id(0).to(tl.int64)
+    c = tl.arange(0, BH)
+    cm = c < H
+    h = tl.load(Hs + t * h_stride_t + c, mask=cm, other=0.0)
+    m = tl.load(Ms + t * m_stride_t + c, mask=cm, other=0.0)
+    tl.store(Cat + t * 2 * H + c, (h * _rms_inv(tl.sum(h * h, 0), H, eps)).to(tl.bfloat16), mask=cm)
+    tl.store(Cat + t * 2 * H + H + c, (m * _rms_inv(tl.sum(m * m, 0), H, eps)).to(tl.bfloat16), mask=cm)
+
+
+@triton.jit
+def _msg_up_tile_kernel(G, Hs, h_stride_t, Ms, m_stride_t, Wf, Wg, Dst, dst_stride_t, SS, T,
+                        NORM: tl.constexpr, H: tl.constexpr, RANK: tl.constexpr, NBLK: tl.constexpr,
+                        BM: tl.constexpr, BN: tl.constexpr):
+    """Prefill, (BM tokens) x (BN channels) per program: o = (1 - tanh(g Wf^T)) h + tanh(g Wg^T) m, fp32 to Dst
+    (3xTF32 dots, about fp32 accuracy); with NORM also the block's sums of squares to SS[t, blk]."""
+    rows = tl.program_id(0) * BM + tl.arange(0, BM)
+    pb = tl.program_id(1)
+    rm = rows < T
+    r64 = rows.to(tl.int64)
+    kk = tl.arange(0, RANK)
+    n = pb * BN + tl.arange(0, BN)
+    g = tl.load(G + r64[:, None] * RANK + kk[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
+    wf = tl.load(Wf + n[:, None] * RANK + kk[None, :]).to(tl.float32)
+    wg = tl.load(Wg + n[:, None] * RANK + kk[None, :]).to(tl.float32)
+    f = _tanh(tl.dot(g, tl.trans(wf), input_precision="tf32x3"))
+    ga = _tanh(tl.dot(g, tl.trans(wg), input_precision="tf32x3"))
+    h = tl.load(Hs + r64[:, None] * h_stride_t + n[None, :], mask=rm[:, None], other=0.0)
+    m = tl.load(Ms + r64[:, None] * m_stride_t + n[None, :], mask=rm[:, None], other=0.0)
+    o = (1.0 - f) * h + ga * m
+    tl.store(Dst + r64[:, None] * dst_stride_t + n[None, :], o, mask=rm[:, None])
+    if NORM:
+        tl.store(SS + r64 * NBLK + pb, tl.sum(o * o, 1), mask=rm)
+
+
+@triton.jit
+def _msg_norm_tile_kernel(Src, src_stride_t, SS, Wn, Out, out_stride_t, T, eps, H: tl.constexpr,
+                          NBLK: tl.constexpr, NBLK_P2: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr):
+    rows = tl.program_id(0) * BM + tl.arange(0, BM)
+    rm = rows < T
+    r64 = rows.to(tl.int64)
+    b = tl.arange(0, NBLK_P2)
+    ss = tl.sum(tl.load(SS + r64[:, None] * NBLK + b[None, :], mask=rm[:, None] & (b < NBLK)[None, :], other=0.0), 1)
+    rinv = _rms_inv(ss, H, eps)
+    n = tl.program_id(1) * BN + tl.arange(0, BN)
+    o = tl.load(Src + r64[:, None] * src_stride_t + n[None, :], mask=rm[:, None], other=0.0)
+    o = o * rinv[:, None] * tl.load(Wn + n).to(tl.float32)[None, :]
+    tl.store(Out + r64[:, None] * out_stride_t + n[None, :], o.to(tl.bfloat16), mask=rm[:, None])
+
+
+def _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w, tmp=None):
+    """Same math as the per-token kernels, for prefill: a norm/concat kernel, one cuBLAS GEMM for the down
+    projection, a tiled kernel for the rank-64 up projections and the gated combine, and a tiled output norm."""
     eps = cfg.rms_eps
+    _, t, h = hs.shape
+    rank = cfg.gate_rank
+    cat = torch.empty(t, 2 * h, dtype=torch.bfloat16, device=hs.device)
+    bh = triton.next_power_of_2(h)
+    bm, bn = 64, 128
+    assert h % bn == 0
+    nblk = h // bn
+    ss = torch.empty(t, nblk, dtype=torch.float32, device=hs.device) if norm_w is not None else cat
+    grid = (triton.cdiv(t, bm), nblk)
     for j in range(n_gate):
-        h, m = hs[j], ms[j]
-        xn = (h * torch.rsqrt(h.square().mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
-        mn = (m * torch.rsqrt(m.square().mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
-        g = (torch.cat([xn, mn], -1) @ lw.ctl_down[gate0 + j].t()).float()
-        f = torch.tanh(g @ lw.ctl_forget[gate0 + j].float().t())
-        ga = torch.tanh(g @ lw.ctl_gain[gate0 + j].float().t())
-        o = (1.0 - f) * h + ga * m
+        hj, mj = hs[j], ms[j]
+        _msg_prep_kernel[(t,)](hj, hj.stride(0), mj, mj.stride(0), cat, eps, H=h, BH=bh, num_warps=8)
+        g = cat @ lw.ctl_down[gate0 + j].t()  # [T, rank] bf16
         if norm_w is not None:
-            o = o * torch.rsqrt(o.square().mean(-1, keepdim=True) + eps) * norm_w[j].float()
-            out[j].copy_(o.to(torch.bfloat16))
+            dst = tmp[j] if tmp is not None else torch.empty(t, h, dtype=torch.float32, device=hs.device)
         else:
-            out[j].copy_(o)
+            dst = out[j]
+        _msg_up_tile_kernel[grid](
+            g, hj, hj.stride(0), mj, mj.stride(0), lw.ctl_forget[gate0 + j], lw.ctl_gain[gate0 + j],
+            dst, dst.stride(0), ss, t, NORM=norm_w is not None, H=h, RANK=rank, NBLK=nblk, BM=bm, BN=bn,
+            num_warps=8, num_stages=1,
+        )
+        if norm_w is not None:
+            _msg_norm_tile_kernel[grid](dst, dst.stride(0), ss, norm_w[j], out[j], out[j].stride(0), t, eps, H=h,
+                                        NBLK=nblk, NBLK_P2=triton.next_power_of_2(nblk), BM=bm, BN=bn, num_warps=8)
 
 
 def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=None, tmp=None):
@@ -641,7 +726,7 @@ def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=No
     strides) or fp32 (no norm)."""
     _, t, h = hs.shape
     if t >= PREFILL_GEMM_MIN_TOKENS:
-        return _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w)
+        return _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w, tmp)
     rank = cfg.gate_rank
     _msg_down_kernel[(t, n_gate, rank // 4)](
         hs, hs.stride(0), hs.stride(1), ms, ms.stride(0), ms.stride(1), lw.ctl_down, g_buf, cfg.rms_eps,

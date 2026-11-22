@@ -72,17 +72,27 @@ across waves.
 layers (0-19) to NVFP4 (per-row outer scale, e4m3 scales per 16 values, 4-or-6 block-scale choice, as vLLM's sm_120
 path does) and run both expert GEMMs as `tl.dot_scaled` e2m1 x e2m1 on the FP4 tensor cores (the compiled kernel uses
 the native block-scaled MMA). Per layer (`tests/gpu/fp4_check.py`, layer 3, random inputs): 2048 tokens 1.88 -> 1.04 ms,
-8192 tokens 7.95 -> 2.07 ms. Engine, 8k prompt, same day back to back (`bench_spec.py`): 16.4k -> 21.7k tok/s;
-`bench_prefill.py` (8k random tokens): 12.0k -> 14.7k tok/s with 2048-token chunks, 16.2k with 8192-token chunks.
-Decode is unchanged (prefill only). The bf16 path pays the GeForce half-rate bf16 MMA; the FP4 path does not, so its
+8192 tokens 7.95 -> 2.07 ms. Engine, 8k prompt, same day back to back (`bench_spec.py`): 16.4k -> 21.7k tok/s
+before the glue work below, 22.9k -> 28.3k after it. Decode step costs are unchanged, but DSpark accepts slightly
+fewer drafts after an fp4 prefill (temperature 1: acceptance 2.03-2.05 vs 2.14-2.32 over three runs each, 186-192 vs
+196-219 tok/s; greedy about 5% lower), presumably because the drafter reads prompt hidden states computed with
+NVFP4 activations. On the proxy the prefill saving and the decode loss roughly cancel for an 8k prompt with 256 new
+tokens; fp4_prefill pays for long prompts with short answers, and more on a GeForce card.
+
+Prefill glue (both paths; 8k random tokens with fp4, `bench_prefill.py ... ops`, 549 -> 416 ms): expert routing
+uses a counting sort (histogram, tile plan and scatter kernels, no host sync) instead of `argsort`; the prefill
+message gates run as a norm/concat kernel, one cuBLAS GEMM and tiled up-projection/norm kernels instead of ~15
+eager fp32 ops per gate; the prefill router GEMM runs on the TF32 tensor cores with 3xTF32 products (max error
+1.6e-6 vs 1.2e-6 for cuBLAS fp32 on unit-scale logits, identical top-8 sets in `tests/gpu/test_glue.py`).
+GSM8K after these changes (bf16): 0.830. The bf16 path pays the GeForce half-rate bf16 MMA; the FP4 path does not, so its
 gain on an RTX 5090 should be larger than on this proxy.
 
 Numerics (`tests/gpu/fp4_e2e.py`, 3072 tokens of natural text, all logits): bf16 with 1024- vs 512-token chunks
 (the bf16 noise floor) top-1 0.984, KL 2.7e-3; fp4 vs bf16 top-1 0.972, KL 8.2e-3; next-token NLL 0.730 (bf16) vs
 0.738 (fp4). GSM8K with fp4 prefill: 0.850 (below). Off by default because it departs from the bf16 checkpoint math.
 
-19.4k tok/s on an 8k prompt (2048-token chunks, `bench_spec.py`), 12.9k tok/s on 8k random tokens
-(`bench_prefill.py`; random tokens spread over more experts). The expert GEMMs run on bf16 tensor cores with fp32
+22.9k tok/s on an 8k prompt (2048-token chunks, `bench_spec.py`; 19.4k before the glue work above),
+28.3k with `fp4_prefill`. Random tokens spread over more experts and run slower (`bench_prefill.py`). The expert GEMMs run on bf16 tensor cores with fp32
 accumulation: full rate on the RTX PRO 6000, about half rate on GeForce (RTX 5090), so expect lower prefill on a 5090.
 
 ## Quality

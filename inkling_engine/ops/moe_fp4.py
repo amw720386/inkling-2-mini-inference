@@ -20,7 +20,7 @@ import triton
 import triton.language as tl
 
 from ..quant import ExpertWeight
-from .moe_triton import _swiglu_pairs_2d
+from .moe_triton import _swiglu_pairs_2d, plan_tiles
 
 def check_support():
     major, minor = (int(v) for v in triton.__version__.split(".")[:2])
@@ -191,18 +191,7 @@ def moe_prefill_fp4(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: 
     k = ids.shape[1]
     e, n13, _ = w13.shape
     inter = n13 // 2
-    flat = ids.reshape(-1).long()
-    order = torch.argsort(flat, stable=True)
-    counts = torch.bincount(flat, minlength=e)
-    tiles_per = (counts + bm - 1) // bm
-    n_tiles = int(tiles_per.sum())
-    starts_e = torch.cumsum(counts, 0) - counts
-    tile_expert = torch.repeat_interleave(torch.arange(e, device=x.device), tiles_per)
-    tile_rank = torch.arange(n_tiles, device=x.device) - (torch.cumsum(tiles_per, 0) - tiles_per)[tile_expert]
-    tile_start = (starts_e[tile_expert] + tile_rank * bm).to(torch.int32)
-    tile_end = torch.minimum(tile_start + bm, (starts_e + counts)[tile_expert].to(torch.int32))
-    tile_expert = tile_expert.to(torch.int32)
-    row_src = order.to(torch.int32)
+    row_src, tile_expert, tile_start, tile_end, n_tiles = plan_tiles(ids, e, bm)
     wts_f = wts.reshape(-1).float().contiguous()
     rows = rows_out if rows_out is not None else torch.empty(t * k, hdim, dtype=torch.float32, device=x.device)
 
