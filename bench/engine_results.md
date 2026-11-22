@@ -33,7 +33,9 @@ SGLang's RTX 5090 recipe caps the context at 65,536 (Balanced) and 31,737 (DSpar
 
 ## Prefill
 
-~13k tok/s on an 8k prompt (2048-token chunks), ~6k tok/s on a 512-token prompt.
+19.4k tok/s on an 8k prompt (2048-token chunks, `bench_spec.py`), 12.9k tok/s on 8k random tokens
+(`bench_prefill.py`; random tokens spread over more experts). The expert GEMMs run on bf16 tensor cores with fp32
+accumulation: full rate on the RTX PRO 6000, about half rate on GeForce (RTX 5090), so expect lower prefill on a 5090.
 
 ## Quality
 

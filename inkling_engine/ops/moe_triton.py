@@ -132,7 +132,7 @@ def _prune(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-@triton.autotune(configs=_GEMV_CONFIGS, key=["N", "K", "FMT", "ACT", "HW_FP4"], restore_value=["Out"],
+@triton.autotune(cache_results=True, configs=_GEMV_CONFIGS, key=["N", "K", "FMT", "ACT", "HW_FP4"], restore_value=["Out"],
                  prune_configs_by={"early_config_prune": _prune})
 @triton.jit
 def _moe_gemv_kernel(
@@ -349,7 +349,7 @@ def _prune_grouped(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-_grouped_tuned = triton.autotune(configs=_GROUPED_CONFIGS, key=["N", "K", "FMT", "ACT", "BM"],
+_grouped_tuned = triton.autotune(cache_results=True, configs=_GROUPED_CONFIGS, key=["N", "K", "FMT", "ACT", "BM"],
                                  prune_configs_by={"early_config_prune": _prune_grouped})(_grouped_kernel)
 
 

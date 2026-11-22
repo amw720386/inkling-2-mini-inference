@@ -65,7 +65,7 @@ _ATTN_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_ATTN_CONFIGS, key=["TOK", "NSPLIT", "WINDOW", "RING", "D", "H"])
+@triton.autotune(cache_results=True, configs=_ATTN_CONFIGS, key=["TOK", "NSPLIT", "WINDOW", "RING", "D", "H"])
 @triton.jit
 def _attn_kernel(
     Q, q_stride_t,  # [T, H, D] (row stride q_stride_t, head stride D)

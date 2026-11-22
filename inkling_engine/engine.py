@@ -115,6 +115,13 @@ class Engine:
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
         self.state_ids: list[int] = []  # tokens whose positions the cache holds
         self.snap = None  # state at the end of the last prompt (see _snapshot)
+        # compile and autotune the prefill kernels (first and later chunks) now, not in the first long request
+        warm = min(2 * prefill_chunk + 100, max_ctx - 16)
+        self.prefill(list(range(1000, 1000 + warm)))
+        self.cache.reset_slot(0)
+        self.state_ids, self.snap = [], None
+        if self.drafter is not None:
+            self.drafter.reset()
 
     def _calibrate(self) -> dict[int, float]:
         """Measured ms of a round per verify width (draft + verify), for the width policy."""

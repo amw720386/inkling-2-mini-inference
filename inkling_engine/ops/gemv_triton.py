@@ -19,7 +19,7 @@ _CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
 @triton.jit
 def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
     pid = tl.program_id(0)
@@ -58,7 +58,7 @@ def mm(x: torch.Tensor, w, out: torch.Tensor) -> torch.Tensor:
     return torch.mm(x, w.t(), out=out)
 
 
-@triton.autotune(configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
 @triton.jit
 def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
     """Y = (X @ W8^T) * scale[col]; W8 float8_e4m3 [N, K] with one fp32 scale per row."""

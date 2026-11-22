@@ -24,14 +24,18 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 
 | | plain decode | DSpark decode | 8k-prompt decode (plain / DSpark) | prefill (8k) |
 |---|---:|---:|---:|---:|
-| this engine, bf16 | 153 tok/s | 256 tok/s | 146 / 241 tok/s | ~13.7k tok/s |
-| this engine, `dense_fp8` | 173 tok/s | 252 tok/s | 164 / 239 tok/s | ~13k tok/s |
+| this engine, bf16 | 153 tok/s | 254 tok/s | 144 / 224-241 tok/s | ~19k tok/s |
+| this engine, `dense_fp8` | 173 tok/s | 252 tok/s | 164 / 239 tok/s | ~19k tok/s |
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
 
 \* SGLang's DSpark numbers come from its own benchmark prompts (its 8k figure is a document-summary prompt with high
 acceptance), so they are not the same prompts as the rows above. Four concurrent streams: 405 tok/s aggregate
 (SGLang Balanced: 269). Memory after start-up with DSpark and a 32k context: ~23 GiB, leaving room for long
 contexts that SGLang's 32 GB recipe cannot hold (see `bench/baseline_sglang.md`).
+
+Prefill caveat: the expert GEMMs dequantize to bf16 and run on bf16 tensor cores with fp32 accumulation, which the
+RTX PRO 6000 runs at full rate and GeForce cards (RTX 5090) at roughly half rate, so prefill on a real 5090 is likely
+noticeably slower than the proxy figure. Decode is memory-bound and should carry over.
 
 ## Layout
 
