@@ -189,32 +189,40 @@ class Drafter:
         self.f_rnn.copy_(mix_rmsnorm(feats[-1:], self.alpha[3], self.f_norm)[0])
 
     # ------------------------------------------------------------------- draft
-    def _attention(self, l, L, xn, positions):
+    def _project(self, L, xn, positions, out):
+        """q/k/v of block rows: q, k = rope(rms_head * norm), v as is."""
         n = xn.shape[0]
-        P = positions[:1]
-        qkv = dense_mm(xn, L["qkv"], self.qkv_out)
+        qkv = dense_mm(xn, L["qkv"], out)
         q, k, v = qkv.split([HEADS * HEAD_DIM, KV_HEADS * HEAD_DIM, KV_HEADS * HEAD_DIM], dim=-1)
         q = rope(bf(rms(q.reshape(n, HEADS, HEAD_DIM), L["q_norm"])), positions)
         k = rope(bf(rms(k.reshape(n, KV_HEADS, HEAD_DIM), L["k_norm"])), positions)
-        v = v.reshape(n, KV_HEADS, HEAD_DIM)
+        return q, k, v.reshape(n, KV_HEADS, HEAD_DIM)
+
+    def _attn_core(self, l, q, k, v, positions):
+        """Bidirectional block attention of one slot's 8 rows over its context (the current _use slot)."""
+        n = q.shape[0]
+        P = positions[:1]
         keys, vals = self.k_ctx[l], self.v_ctx[l]
         if l in LOCAL:
             keys[WINDOW:] = k
             vals[WINDOW:] = v
             cpos = self.ctx_pos[l]
             ring_ok = (cpos >= 0) & (cpos < P) & (cpos >= P - WINDOW)
-            valid = torch.cat([ring_ok, torch.ones(n, dtype=torch.bool, device=xn.device)])
+            valid = torch.cat([ring_ok, torch.ones(n, dtype=torch.bool, device=q.device)])
         else:
             slots = positions % self.ctx
             keys.index_copy_(0, slots, k)
             vals.index_copy_(0, slots, v)
             keys, vals = keys[:self.bucket], vals[:self.bucket]
-            valid = torch.arange(self.bucket, device=xn.device) < P + n
+            valid = torch.arange(self.bucket, device=q.device) < P + n
         o = F.scaled_dot_product_attention(q.transpose(0, 1)[None], keys.transpose(0, 1)[None],
                                            vals.transpose(0, 1)[None], attn_mask=valid[None, None, None, :],
                                            enable_gqa=True)
-        o = bf(o[0].transpose(0, 1).reshape(n, HEADS * HEAD_DIM)).contiguous()
-        return dense_mm(o, L["wo"], self.h_out)
+        return bf(o[0].transpose(0, 1).reshape(n, HEADS * HEAD_DIM))
+
+    def _attention(self, l, L, xn, positions):
+        q, k, v = self._project(L, xn, positions, self.qkv_out)
+        return dense_mm(self._attn_core(l, q, k, v, positions).contiguous(), L["wo"], self.h_out)
 
     @torch.inference_mode()
     def _draft(self):
@@ -267,6 +275,96 @@ class Drafter:
         self.draft_tokens.copy_(torch.cat(tokens))
         return self.draft_tokens, self.conf
 
+    # -------------------------------------------------------- multi-slot draft
+    def _init_multi(self, device="cuda"):
+        D, V = self.embed.shape[1], self.head.shape[0]
+        n = self.slots
+        z = lambda *s_, dt=torch.float32: torch.zeros(*s_, dtype=dt, device=device)  # noqa: E731
+        self.m_anchor = z(n, dt=torch.long)
+        self.m_P = z(n, dt=torch.long)
+        self.m_temp = z(n)
+        self.m_tok = z(n, GAMMA, dt=torch.long)
+        self.m_conf = z(n, GAMMA)
+        self.m_cand = z(n, GAMMA, CANDIDATES, dt=torch.long)
+        self.m_qkv = z(BLOCK * n, self.qkv_out.shape[1], dt=torch.bfloat16)
+        self.m_gu = z(BLOCK * n, self.gu_out.shape[1], dt=torch.bfloat16)
+        self.m_h = z(BLOCK * n, D, dt=torch.bfloat16)
+        self.m_o = z(BLOCK * n, HEADS * HEAD_DIM, dt=torch.bfloat16)
+        self.m_base = z(GAMMA * n, V, dt=torch.bfloat16)
+        self.m_heads = [MarkovHead(GAMMA, RANK, CANDIDATES, device) for _ in range(n)]
+        self.multi_graphs: dict = {}
+
+    @torch.inference_mode()
+    def _draft_multi(self, slots: tuple):
+        """Drafts of several slots at once: the layers' and the head's GEMVs run once over all blocks
+        (weights read once); attention and the Markov head run per slot."""
+        k = len(slots)
+        dev = self.mask_embed.device
+        anchors = self.m_anchor[:k]
+        rows = BLOCK * k
+        emb = bf(rms(self.embed[anchors].float(), self.embed_norm))  # [k, D]
+        x0 = torch.cat([emb[:, None], self.mask_embed[None, None].expand(k, GAMMA, -1)], 1).reshape(rows, -1)
+        positions = (self.m_P[:k, None] + torch.arange(BLOCK, device=dev)[None]).reshape(-1)
+        res = x0
+        xn = bf(rms(res, self.layers[0]["in_norm"]))
+        for l, L in enumerate(self.layers):
+            q, kk, v = self._project(L, xn, positions, self.m_qkv[:rows])
+            for i, s_ in enumerate(slots):
+                self._use(s_)
+                r = slice(BLOCK * i, BLOCK * (i + 1))
+                self.m_o[r] = self._attn_core(l, q[r], kk[r], v[r], positions[r])
+            attn = dense_mm(self.m_o[:rows], L["wo"], self.m_h[:rows])
+            res = bf(res.float() + attn.float())
+            xn = bf(rms(res, L["post_norm"]))
+            gu = dense_mm(xn, L["gate_up"], self.m_gu[:rows])
+            gate, up = gu.chunk(2, dim=-1)
+            m = dense_mm(bf(F.silu(gate.float()) * up.float()).contiguous(), L["w_down"], self.m_h[:rows])
+            res = bf(res.float() + m.float())
+            nxt = self.layers[l + 1]["in_norm"] if l < 2 else self.final_norm
+            xn = bf(rms(res, nxt))
+        h = xn.reshape(k, BLOCK, -1)[:, 1:].reshape(GAMMA * k, -1).contiguous()
+        base = dense_mm(h, self.head8, self.m_base[:GAMMA * k]).float()
+        for i, s_ in enumerate(slots):
+            r = slice(GAMMA * i, GAMMA * (i + 1))
+            cand_base, cand = base[r].topk(CANDIDATES, dim=-1)
+            f = self.ctxs[s_]["f"]
+            rest = torch.cat([h[r], f[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest
+            self.m_cand[i].copy_(cand)
+            self.m_heads[i].run(rest.contiguous(), cand_base.contiguous(), self.m_cand[i], self.rnn_w_step,
+                                self.rnn_b, self.w1, self.m_anchor[i:i + 1], self.fold_w, self.fold_b, self.m_tok[i],
+                                self.m_conf[i], self.m_temp[i:i + 1], self.seed)
+        self.seed.add_(1)
+
+    def draft_multi(self, anchors: list[int], Ps: list[int], temps: list[float], slots: list[int]):
+        """Drafts for several slots in one pass. Returns per slot (tokens [7], conf [7], candidate ids
+        [7, K], candidate logits [7, K]) views, valid until the next draft."""
+        if not hasattr(self, "multi_graphs"):
+            self._init_multi()
+        k = len(slots)
+        self.m_anchor[:k].copy_(torch.tensor(anchors, dtype=torch.long), non_blocking=True)
+        self.m_P[:k].copy_(torch.tensor(Ps, dtype=torch.long), non_blocking=True)
+        self.m_temp[:k].copy_(torch.tensor(temps, dtype=torch.float32), non_blocking=True)
+        bucket = self.ctx  # one graph per slot set: attending over the whole ring is cheap for 8 query rows
+        key = (tuple(slots), bucket)
+        if self.graphs:  # graphs mode: capture this slot set / bucket on first use
+            g = self.multi_graphs.get(key)
+            if g is None:
+                self.bucket = bucket
+                st = torch.cuda.Stream()
+                st.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(st):
+                    self._draft_multi(key[0])
+                torch.cuda.current_stream().wait_stream(st)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    self._draft_multi(key[0])
+                self.multi_graphs[key] = g
+            g.replay()
+        else:
+            self.bucket = bucket
+            self._draft_multi(key[0])
+        return [(self.m_tok[i], self.m_conf[i], self.m_cand[i], self.m_heads[i].logits) for i in range(k)]
+
     def capture(self):
         """Draft graphs per (context bucket, slot) and commit graphs per (rows, slot); one memory pool."""
         dev = self.mask_embed.device
@@ -304,6 +402,14 @@ class Drafter:
                 self.commit_graphs[(n, slot)] = g
         self.bucket = self.ctx
         self.buckets = buckets
+        # multi-slot drafts for every slot set of 2+ slots (batched speculation), captured now, not mid-serving
+        if self.slots > 1:
+            from itertools import combinations
+
+            self._init_multi()
+            for k in range(2, self.slots + 1):
+                for combo in combinations(range(self.slots), k):
+                    self.draft_multi([0] * k, [0] * k, [0.0] * k, list(combo))
         self._use(0)
         self.reset()
 

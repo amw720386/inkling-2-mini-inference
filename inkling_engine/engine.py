@@ -25,6 +25,7 @@ from .weights import load_weights
 
 VERIFY_WIDTHS = (2, 4, 8)
 GAMMA = 7  # drafted tokens per DSpark round
+SEEDED_GAMMA = 2.0  # fixed confidence calibration for seeded requests (reproducible width choices)
 IMAGE_TOKEN_ID = 200054
 
 
@@ -180,20 +181,21 @@ class Engine:
             best = max(best, tokens / (k * self.draft_cost + self.verify_costs[(k, m)]))
         return best, k / self.decode_costs[k]
 
-    def _expected(self, conf: list[float], m: int) -> float:
+    def _expected(self, conf: list[float], m: int, gamma: float | None = None) -> float:
         """Expected accepted drafts of a width-m verify: leading products of conf ** gamma."""
+        g = self.gamma if gamma is None else gamma
         exp, run = 0.0, 1.0
         for c in conf[:m - 1]:
-            run *= c ** self.gamma
+            run *= c ** g
             exp += run
         return exp
 
-    def _pick_width(self, conf: list[float]) -> int:
+    def _pick_width(self, conf: list[float], gamma: float | None = None) -> int:
         """Width maximizing expected committed tokens per ms. The drafter's confidences overstate
         acceptance; gamma (confidence ** gamma) is tuned online by `_observe`."""
         best, best_rate = VERIFY_WIDTHS[0], -1.0
         for m in VERIFY_WIDTHS:
-            rate = (1.0 + self._expected(conf, m)) / self.costs[m]
+            rate = (1.0 + self._expected(conf, m, gamma)) / self.costs[m]
             if rate > best_rate:
                 best, best_rate = m, rate
         return best
@@ -354,7 +356,8 @@ class Engine:
         drafts, conf = self.drafter.draft(anchor, P, max(sp.temperature, 0.0), slot=slot)
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
-        m = self._pick_width(confs)
+        seeded = sp.seed is not None
+        m = self._pick_width(confs, SEEDED_GAMMA if seeded else None)
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
@@ -367,7 +370,8 @@ class Engine:
         else:
             acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
         commit = acc + 1
-        self._observe(confs, m, acc)
+        if not seeded:
+            self._observe(confs, m, acc)
         self.cache.commit_spec(slot, commit, 0)
         self.drafter.commit(taps[:commit], P, slot=slot)
         if st is not None:
@@ -382,16 +386,16 @@ class Engine:
         anchor), .sp, .gen, .stats. Returns per request (new tokens, rows committed)."""
         d = self.drafter
         drafts = []
-        for r in reqs:
-            tok, conf = d.draft(r.out[-1], r.P, max(r.sp.temperature, 0.0), slot=r.slot)
-            q = d.draft_distribution(GAMMA, r.sp.temperature) if r.sp.temperature > 0 else (None, None)
-            drafts.append((tok.clone(), conf.clone(), q[0].clone() if q[0] is not None else None,
-                           q[1].clone() if q[1] is not None else None))
+        multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs],
+                              [max(r.sp.temperature, 0.0) for r in reqs], [r.slot for r in reqs])
+        for r, (tok, conf, cand, lg_c) in zip(reqs, multi):
+            q = torch.softmax(lg_c / r.sp.temperature, -1) if r.sp.temperature > 0 else None
+            drafts.append((tok, conf, cand if q is not None else None, q))
         info = torch.cat([torch.cat([c, t.float()]) for t, c, _, _ in drafts]).tolist()  # one sync
         k = len(reqs)
         confs = [info[i * 14:i * 14 + 7] for i in range(k)]
         drafted = [[int(x) for x in info[i * 14 + 7:i * 14 + 14]] for i in range(k)]
-        m = max(self._pick_width(c) for c in confs)
+        m = max(self._pick_width(c, SEEDED_GAMMA if r.sp.seed is not None else None) for c, r in zip(confs, reqs))
         vt = torch.empty(k * m, dtype=torch.int64, device="cuda")
         for i, r in enumerate(reqs):
             vt[i * m] = r.out[-1]
@@ -417,7 +421,8 @@ class Engine:
         for i, r in enumerate(reqs):
             a, nxt = res[i]
             commit = a + 1
-            self._observe(confs[i], m, a)
+            if r.sp.seed is None:
+                self._observe(confs[i], m, a)
             self.cache.commit_spec(r.slot, commit, i)
             d.commit(taps[i * m:i * m + commit], r.P, slot=r.slot)
             r.stats.rounds += 1

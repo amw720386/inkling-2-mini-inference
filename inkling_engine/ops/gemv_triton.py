@@ -10,7 +10,7 @@ import triton.language as tl
 
 from .pdl import PDL_ON, enable as _pdl_enable
 
-MAX_M = 16
+MAX_M = 32
 
 _CONFIGS = [
     triton.Config({"BN": bn, "BK": bk}, num_warps=nw, num_stages=ns)
@@ -21,7 +21,7 @@ _CONFIGS = [
 ]
 
 
-@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
 @triton.jit
 def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
@@ -41,12 +41,12 @@ def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.co
 
 
 def gemv(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-    """out[M, N] = x[M, K] @ w[N, K]^T, M <= 16. Unit last strides required."""
+    """out[M, N] = x[M, K] @ w[N, K]^T, M <= 32. Unit last strides required."""
     m, k = x.shape
     n = w.shape[0]
     assert m <= MAX_M and x.stride(1) == 1 and w.stride(1) == 1 and out.stride(1) == 1
     _dense_gemv_kernel[lambda meta: (triton.cdiv(n, meta["BN"]),)](
-        x, w, out, m, n, k, x.stride(0), w.stride(0), out.stride(0), MP=16,
+        x, w, out, m, n, k, x.stride(0), w.stride(0), out.stride(0), MP=16 if m <= 16 else 32,
     )
     return out
 
@@ -62,7 +62,7 @@ def mm(x: torch.Tensor, w, out: torch.Tensor) -> torch.Tensor:
     return torch.mm(x, w.t(), out=out)
 
 
-@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
+@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
 @triton.jit
 def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Y = (X @ W8^T) * scale[col]; W8 float8_e4m3 [N, K] with one fp32 scale per row."""
@@ -101,7 +101,7 @@ def fp8_gemv(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
     n = w.w8.shape[0]
     assert m <= MAX_M
     _fp8_gemv_kernel[lambda meta: (triton.cdiv(n, meta["BN"]),)](
-        x, w.w8, w.scale, out, m, n, k, x.stride(0), w.w8.stride(0), out.stride(0), MP=16,
+        x, w.w8, w.scale, out, m, n, k, x.stride(0), w.w8.stride(0), out.stride(0), MP=16 if m <= 16 else 32,
     )
     return out
 
