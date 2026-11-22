@@ -1,5 +1,6 @@
 """Memory of the server's default configuration under the 32 GiB cap (Modal: parity --args "memcheck.py")."""
 
+import gc
 import sys
 
 import torch
@@ -20,5 +21,12 @@ for kw in (dict(max_ctx=32768, slots=4, vision=True), dict(max_ctx=262144, slots
         eng.prefill_slot(slot, list(range(2000, 2000 + 4000)))
     print(f"{kw}: after start {a:.2f} GiB (peak {pk:.2f}); after a {n}-token prefill peak "
           f"{torch.cuda.max_memory_allocated() / G:.2f} GiB, reserved {torch.cuda.memory_reserved() / G:.2f} GiB")
+    import weakref
+
+    ref = weakref.ref(eng)
     del eng
+    gc.collect()  # the engine holds reference cycles (graphs, drafter); free it before the next profile
     torch.cuda.empty_cache()
+    if ref() is not None:
+        print("engine still referenced by:", [type(r).__name__ for r in gc.get_referrers(ref())][:10])
+    print(f"after cleanup: allocated {torch.cuda.memory_allocated() / G:.2f} GiB, reserved {torch.cuda.memory_reserved() / G:.2f} GiB")

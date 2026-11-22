@@ -9,13 +9,20 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 161.6 tok/s | 283.4 tok/s | 149.7 tok/s | 250.3 tok/s |
+| bf16 | 158.8 tok/s | 295.3 tok/s | 153.8 tok/s | 279.3 tok/s |
 | `dense_fp8` | 190.7 tok/s | 310.5 tok/s | 184.0 tok/s | 270.5 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
 Modal machines differ by a few percent in decode. `dense_fp8` now reads the FP8 copies at every step size, including
 verify steps of 17-32 tokens that used bf16 before (183.1 / 288.8 then), and uses FP8 GEMMs for prefill; temperature 1
 DSpark 237.6 tok/s, 8k prefill 24.8k tok/s.)
+
+Drafter (`tests/gpu/prof_draft.py`): the draft graph went 1.48 -> 0.98 ms by fusing its glue (residual add + RMS
+norm, per-head q/k norm + rotary and the SiLU product as Triton kernels instead of ~200 eager ops) and by computing
+its block attention per KV head instead of SDPA's `enable_gqa`, which copied K/V to all 24 query heads (0.8 GB at the
+64k context bucket). Multi-slot drafts now pick the context bucket of their longest sequence too (4 slots: 5.05 ->
+2.79 ms; captured per slot set and bucket at start-up). Same drafts, same acceptance; DSpark 284 -> 295 tok/s,
+8k-prompt DSpark 250 -> 279 tok/s, temperature 1 215 -> 224 tok/s.
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
@@ -33,8 +40,8 @@ tokens, ~300 tok/s aggregate including prefill (SGLang Balanced c4: 269); 2 conc
 draft context, so whichever request is left decoding alone speculates.
 
 Batched speculation (`tests/gpu/bench_batched_spec.py`, requests stopping at EOS, up to 384 tokens): with 2
-concurrent requests, plain batched 210 tok/s, batched DSpark 248, adaptive 244; with 4, plain 290, batched
-DSpark 320, adaptive 321. The drafts of all active requests run as one pass (shared GEMVs; 4 drafts 6.4 -> 3.1
+concurrent requests, plain batched 240 tok/s, batched DSpark 293, adaptive 301; with 4, plain 305, batched
+DSpark 379, adaptive 390 (2026-11-22, after the drafter work; before: 210 / 248 / 244 and 290 / 320 / 321). The drafts of all active requests run as one pass (shared GEMVs; 4 drafts 6.4 -> 3.1
 ms), with graphs for every slot set captured at start-up. The scheduler speculates in a batched step only when the
 calibrated costs and each request's recent acceptance predict more tokens/ms than a plain batched step.
 
@@ -68,10 +75,10 @@ would fall back to the full head most of the time (experiment in git history, co
 
 ## Memory and robustness
 
-`tests/gpu/memcheck.py` (32 GiB cap): the default server profile (4 slots x 32k context, DSpark, vision) holds
-26.3 GiB after start-up and peaks at 28.8 GiB through a 30k-token prefill; the long-context profile (1 slot,
-256k, `kv_fp8`, vision) 25.2 / 28.4 GiB (31.6 GiB reserved by the allocator, so run it with `--no-vision` on a
-5090 that also drives a display). All CUDA graphs share one memory pool.
+`tests/gpu/memcheck.py` (32 GiB cap, every slot holding a prompt snapshot): the default server profile (4 slots x
+32k context, DSpark, vision) holds 26.4 GiB after start-up and peaks at 28.8 GiB through a 30k-token prefill (28.2
+GiB reserved by the allocator); the long-context profile (1 slot, 256k, `kv_fp8`, vision) 25.4 / 28.5 GiB (27.8 GiB
+reserved). All CUDA graphs share one memory pool.
 
 `tests/gpu/soak.py`: 60 mixed requests from 6 concurrent clients (chat / completion / tools / 6k-token prompts,
 greedy and sampled, streaming with 20% dropped mid-stream): 0 errors, scheduler drains, allocated memory identical
