@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -23,6 +25,7 @@ from .ops.attn_triton import inkling_attention, store_kv
 from .ops.conv_triton import _conv_state_kernel, conv_candidates
 from .ops.gemv_triton import Fp8Weight, seg_gemv
 from .ops.gemv_triton import mm as dense_mm
+from .ops.moe_fp4 import moe_prefill_fp4
 from .ops.moe_triton import GroupedScratch, moe_decode, moe_grouped_small, moe_prefill
 from .weights import ModelWeights
 
@@ -87,11 +90,20 @@ class Workspace:
 
 
 class FusedModel:
-    def __init__(self, cfg: InklingConfig, weights: ModelWeights, dense_fp8: bool = False):
+    def __init__(self, cfg: InklingConfig, weights: ModelWeights, dense_fp8: bool = False,
+                 fp4_prefill: bool | None = None):
         """dense_fp8: row-scaled E4M3 copies of the attention projections and the LM head for decode-sized
-        GEMVs (halves their bytes; lossy w.r.t. the bf16 checkpoint, off by default). Prefill keeps bf16."""
+        GEMVs (halves their bytes; lossy w.r.t. the bf16 checkpoint, off by default). Prefill keeps bf16.
+        fp4_prefill: multi-token steps above the decode sizes run the NVFP4 expert layers on the FP4 tensor
+        cores with NVFP4-quantized activations (ops/moe_fp4.py; Triton >= 3.6). Default: env INKLING_FP4_PREFILL."""
         self.cfg, self.w = cfg, weights
         self.dense_fp8 = dense_fp8
+        if fp4_prefill is None:
+            fp4_prefill = os.environ.get("INKLING_FP4_PREFILL", "0") == "1"
+        if fp4_prefill:
+            from .ops.moe_fp4 import check_support
+            check_support()
+        self.fp4_prefill = fp4_prefill
         self.fp8 = {}
         if dense_fp8:
             for lw in weights.layers:
@@ -305,8 +317,9 @@ class FusedModel:
                             c, decode_state=decode_state, cand=cache.cand['mlp_conv'][vi] if verify else None)
                 m = ws.m[:T]
             else:
-                rows = moe_prefill(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
-                                   rows_out=ws.prefill_rows(T * c.top_k, c.hidden_size))
+                moe = moe_prefill_fp4 if (self.fp4_prefill and lw.w13.fmt == "nvfp4") else moe_prefill
+                rows = moe(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
+                           rows_out=ws.prefill_rows(T * c.top_k, c.hidden_size))
                 m = ws.m[:T]
                 fk.post_mlp(rows, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
                             decode_state=False)

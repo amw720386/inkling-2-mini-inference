@@ -13,7 +13,7 @@ path is a small set of fused Triton kernels captured in CUDA graphs, with DSpark
 | Decode | fused per-token kernels, one CUDA graph per step; NVFP4 experts decoded with the hardware `cvt.e2m1x2`; grouped expert GEMMs for multi-token steps |
 | Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences; greedy (longest matching prefix) and sampled requests (speculative rejection sampling, exact for the target distribution: 220 vs 160 tok/s at temperature 1) |
 | Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests with interleaved chunked prefill; speculation for a lone request in any slot and, when it pays, for batched steps (one drafter pass for all slots, slot-independent verify graphs, adaptive choice from calibrated costs) |
-| Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head (faster, not bit-faithful to the bf16 checkpoint) |
+| Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head (faster, not bit-faithful to the bf16 checkpoint); `fp4_prefill`: NVFP4 activations and FP4 tensor cores (`tl.dot_scaled`) for the prefill expert GEMMs, as SGLang / vLLM do on this model (+33% 8k prefill on the proxy; GSM8K unchanged) |
 | Images | transformers' vision tower + processor; features spliced at the image placeholders. Greedy output on an image prompt equals transformers' for 40/40 tokens (`tests/gpu/vision_check.py`) |
 | Long context | `kv_fp8`: E4M3 cache for the full-attention layers; 256k context fits in 32 GiB (25.3 GiB after start-up), 123 tok/s DSpark decode at 131k |
 
@@ -26,7 +26,8 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 | | plain decode | DSpark decode | 8k-prompt decode (plain / DSpark) | prefill (8k) |
 |---|---:|---:|---:|---:|
 | this engine, bf16 | 160 tok/s | 285 tok/s | 150 / 250 tok/s | ~19k tok/s |
-| this engine, `dense_fp8` | 189 tok/s | 281 tok/s | 174 / 273 tok/s | ~19k tok/s |
+| this engine, `dense_fp8` | 183 tok/s | 289 tok/s | 174 / 265 tok/s | ~19k tok/s |
+| this engine, bf16 + `fp4_prefill` | same | same | same | ~22k tok/s |
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
 
 \* SGLang's DSpark numbers come from its own benchmark prompts (its 8k figure is a document-summary prompt with high
@@ -38,9 +39,10 @@ Concurrent requests through the scheduler (`tests/gpu/bench_batched_spec.py`): 2
 start-up; a 256k-context profile fits too, which SGLang's 32 GB recipe cannot (see `bench/baseline_sglang.md`).
 Full numbers: `bench/engine_results.md`.
 
-Prefill caveat: the expert GEMMs dequantize to bf16 and run on bf16 tensor cores with fp32 accumulation, which the
-RTX PRO 6000 runs at full rate and GeForce cards (RTX 5090) at roughly half rate, so prefill on a real 5090 is likely
-noticeably slower than the proxy figure. Decode is memory-bound and should carry over.
+Prefill caveat: by default the expert GEMMs dequantize to bf16 and run on bf16 tensor cores with fp32 accumulation,
+which the RTX PRO 6000 runs at full rate and GeForce cards (RTX 5090) at roughly half rate, so default prefill on a real
+5090 is likely noticeably slower than the proxy figure. `--fp4-prefill` moves the NVFP4 expert layers onto the FP4
+tensor cores and avoids that. Decode is memory-bound and should carry over.
 
 ## Layout
 
@@ -57,7 +59,7 @@ inkling_engine/
   sampling.py      temperature / top-k / top-p and speculative rejection sampling
   vision.py        image input (vision tower + processor)
   server.py        OpenAI-compatible HTTP server (streaming, tools, images, reasoning split)
-  ops/             Triton kernels: attention, MoE (GEMV / grouped), GEMV (bf16 / FP8), convs, fused glue
+  ops/             Triton kernels: attention, MoE (GEMV / grouped / FP4 tensor-core prefill), GEMV (bf16 / FP8), convs, fused glue
 tests/             CPU unit tests; tests/gpu/ runs on Modal (parity, kernels, benchmarks, GSM8K, server)
 modal/             Modal entry points (weights volume, SGLang baseline, engine tests)
 bench/             SGLang baseline results and a survey of other Inkling 2 engines
@@ -68,13 +70,15 @@ bench/             SGLang baseline results and a survey of other Inkling 2 engin
 ```bash
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+pip install triton==3.6.0   # newer than torch's pin; needed only for --fp4-prefill
 pip install safetensors tokenizers transformers fastapi uvicorn pillow
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark, 4 slots x 32k
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144 --slots 1 --no-vision
 curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json'   -d '{"messages": [{"role": "user", "content": "Hello!"}], "reasoning_effort": "low"}'
 ```
 
-Options: `--dense-fp8` (FP8 attention projections and LM head, faster, not bit-faithful), `--kv-fp8` (FP8 cache for
+Options: `--dense-fp8` (FP8 attention projections and LM head, faster, not bit-faithful), `--fp4-prefill` (NVFP4
+activations on the FP4 tensor cores for prefill expert GEMMs, Triton >= 3.6), `--kv-fp8` (FP8 cache for
 the full-attention layers), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and
 autotunes the Triton kernels (a few minutes); results are cached in Triton's cache directory.
 
@@ -92,6 +96,8 @@ modal run modal/engine_app.py::parity --args "server_e2e.py"
 ## Credits
 
 - SGLang (Apache-2.0): model structure and sm_120 recipe; the low-M GEMV design follows `sm12x_bf16_gemv`.
+- vLLM (Apache-2.0): the FP4 prefill path follows its sm_120 Inkling 2 expert GEMM; the NVFP4 activation quantizer
+  in `ops/moe_fp4.py` is a trimmed port of its `nvfp4_quantize`.
 - transformers (Apache-2.0): `modeling_inkling2_loop.py`, the numerical reference and NVFP4/MXFP8 dequant.
 - ingine by satellitedown (Apache-2.0, github.com/satellitedown/inkling-2-mini-abliterated-ingine): `dspark.py` is
   a port of its PyTorch DSpark reference; its kernel contracts (`native/KERNELS.md`) informed the fused decode

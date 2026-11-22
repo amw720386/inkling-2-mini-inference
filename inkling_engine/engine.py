@@ -99,7 +99,7 @@ class VerifyGraph:
 class Engine:
     def __init__(self, model_dir: str, max_ctx: int = 32768, spec: bool = True, spec_threshold: float = 0.8,
                  prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False, kv_fp8: bool = False,
-                 slots: int = 1, vision: bool = False):
+                 slots: int = 1, vision: bool = False, fp4_prefill: bool | None = None):
         """slots: concurrent sequences (cache slots and batched decode graphs 1..slots). Speculation and prefix
         reuse apply to slot 0, which the scheduler gives to a request running alone."""
         self.slots = slots
@@ -112,7 +112,7 @@ class Engine:
         ring = self.cfg.sliding_window + 64
         kv_dtype = torch.float8_e4m3fn if kv_fp8 else torch.bfloat16
         self.cache = InklingCache(self.cfg, CacheSpec(slots=slots, max_ctx=max_ctx + 16, ring=ring, kv_dtype=kv_dtype))
-        self.model = FusedModel(self.cfg, self.w, dense_fp8=dense_fp8)
+        self.model = FusedModel(self.cfg, self.w, dense_fp8=dense_fp8, fp4_prefill=fp4_prefill)
         self.model.compact()
         self.prefill_chunk = prefill_chunk
         self.pws = self.model.workspace(prefill_chunk, 1)

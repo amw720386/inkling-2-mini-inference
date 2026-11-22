@@ -9,6 +9,8 @@ RTX 5090 is not offered on Modal; RTX-PRO-6000 is the same GB202 / sm_120 chip w
 
 from __future__ import annotations
 
+import os
+
 import modal
 
 WEIGHTS = "/weights/Inkling-2-Mini"
@@ -35,7 +37,12 @@ image = (
         "requests",
         f"transformers @ git+https://github.com/huggingface/transformers.git@{TRANSFORMERS_SHA}",
     )
-    .env({"TRITON_CACHE_DIR": "/cache/triton", "PYTHONUNBUFFERED": "1"})
+)
+# Triton 3.6 (newer than torch 2.9.1's pinned 3.5.1): NVFP4 tl.dot_scaled on sm_120 for fp4_prefill.
+# INKLING_TRITON=<version> tries another release.
+image = image.pip_install(f"triton=={os.environ.get('INKLING_TRITON', '3.6.0')}")
+image = (
+    image.env({"TRITON_CACHE_DIR": "/cache/triton", "PYTHONUNBUFFERED": "1"})
     .add_local_python_source("inkling_engine")
     .add_local_dir("tests", "/root/tests")
 )

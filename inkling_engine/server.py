@@ -379,6 +379,8 @@ def main():
     ap.add_argument("--no-spec", action="store_true")
     ap.add_argument("--dense-fp8", action="store_true")
     ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
+    ap.add_argument("--fp4-prefill", action="store_true",
+                    help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6)")
     ap.add_argument("--no-vision", action="store_true", help="text only (skips loading the 0.6 GB vision tower)")
     ap.add_argument("--model-id", default="inkling-2-mini")
     a = ap.parse_args()
@@ -390,7 +392,8 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(a.model)
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
-                 kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision)
+                 kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision,
+                 fp4_prefill=a.fp4_prefill or None)
     uvicorn.run(build_app(Server(eng, tok, a.model_id)), host=a.host, port=a.port, log_level="info")
 
 

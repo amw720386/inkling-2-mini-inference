@@ -3,14 +3,17 @@
 These are **not RTX 5090 measurements**. The RTX PRO 6000 uses the same GB202 / sm_120 chip with 188 SMs (the 5090
 has 170) and similar GDDR7 bandwidth; every run caps the process at 32 GiB with
 `torch.cuda.set_per_process_memory_fraction`. Measured 2026-11-21 on Modal (`RTX-PRO-6000`, driver 610/620,
-torch 2.9.1+cu128, Triton 3.5.1).
+torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 ## Decode (batch 1, greedy, 256 new tokens; `tests/gpu/bench_spec.py`)
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 160.0 tok/s | 284.6 tok/s | 150.3 tok/s | 249.6 tok/s |
-| `dense_fp8` | 188.5 tok/s | 281.0 tok/s | 173.8 tok/s | 272.5 tok/s |
+| bf16 | 161.6 tok/s | 283.4 tok/s | 149.7 tok/s | 250.3 tok/s |
+| `dense_fp8` | 183.1 tok/s | 288.8 tok/s | 174.2 tok/s | 265.0 tok/s |
+
+(2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation: bf16 160.0 / 284.6, `dense_fp8`
+188.5 / 281.0. Separate Modal machines differ by a few percent in decode.)
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
@@ -65,6 +68,19 @@ across waves.
 
 ## Prefill
 
+`fp4_prefill` (`--fp4-prefill`, needs Triton >= 3.6): multi-token steps quantize the expert inputs of the NVFP4
+layers (0-19) to NVFP4 (per-row outer scale, e4m3 scales per 16 values, 4-or-6 block-scale choice, as vLLM's sm_120
+path does) and run both expert GEMMs as `tl.dot_scaled` e2m1 x e2m1 on the FP4 tensor cores (the compiled kernel uses
+the native block-scaled MMA). Per layer (`tests/gpu/fp4_check.py`, layer 3, random inputs): 2048 tokens 1.88 -> 1.04 ms,
+8192 tokens 7.95 -> 2.07 ms. Engine, 8k prompt, same day back to back (`bench_spec.py`): 16.4k -> 21.7k tok/s;
+`bench_prefill.py` (8k random tokens): 12.0k -> 14.7k tok/s with 2048-token chunks, 16.2k with 8192-token chunks.
+Decode is unchanged (prefill only). The bf16 path pays the GeForce half-rate bf16 MMA; the FP4 path does not, so its
+gain on an RTX 5090 should be larger than on this proxy.
+
+Numerics (`tests/gpu/fp4_e2e.py`, 3072 tokens of natural text, all logits): bf16 with 1024- vs 512-token chunks
+(the bf16 noise floor) top-1 0.984, KL 2.7e-3; fp4 vs bf16 top-1 0.972, KL 8.2e-3; next-token NLL 0.730 (bf16) vs
+0.738 (fp4). GSM8K with fp4 prefill: 0.850 (below). Off by default because it departs from the bf16 checkpoint math.
+
 19.4k tok/s on an 8k prompt (2048-token chunks, `bench_spec.py`), 12.9k tok/s on 8k random tokens
 (`bench_prefill.py`; random tokens spread over more experts). The expert GEMMs run on bf16 tensor cores with fp32
 accumulation: full rate on the RTX PRO 6000, about half rate on GeForce (RTX 5090), so expect lower prefill on a 5090.
@@ -77,6 +93,7 @@ GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`)
 |---|---:|
 | engine bf16 | 0.835 (0.840 re-run after prefill/scheduler/vision/PDL changes) |
 | engine `dense_fp8` | 0.825 |
+| engine bf16 + `fp4_prefill` | 0.850 |
 | SGLang Balanced (baseline) | 0.850 |
 | SGLang DSpark (baseline) | 0.830 |
 
