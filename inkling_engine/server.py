@@ -352,6 +352,12 @@ def build_app(server: Server):
         return await respond(ids, body, chat=False)
 
     async def respond(ids, body, chat: bool, image_feats=None):
+        limit = server.engine.max_ctx - 16  # room for one verify step
+        if len(ids) > limit:
+            return JSONResponse({"error": {"message": f"prompt has {len(ids)} tokens; this server's context is "
+                                                      f"{server.engine.max_ctx} tokens (--max-ctx)",
+                                           "type": "invalid_request_error", "code": "context_length_exceeded"}},
+                                status_code=400)
         stream = bool(body.get("stream"))
         obj = "chat.completion" if chat else "text_completion"
         if stream:

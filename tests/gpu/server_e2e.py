@@ -161,5 +161,10 @@ with requests.post(B + "/completions", json={**body, "stream": True}, stream=Tru
             sfin = ch.get("finish_reason") or sfin
 print("stop stream:", repr("".join(parts)), sfin)
 ok &= "".join(parts) == txt and sfin == "stop"
+# a prompt longer than the context is a 400, and the server keeps serving
+r = requests.post(B + "/completions", json={"prompt": list(range(1000, 1000 + eng.max_ctx + 10)), "max_tokens": 4})
+print("too long:", r.status_code, r.json().get("error", {}).get("code"))
+ok &= r.status_code == 400 and r.json()["error"]["code"] == "context_length_exceeded"
+ok &= requests.post(B + "/completions", json={"prompt": "Hi", "max_tokens": 4}).ok
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
