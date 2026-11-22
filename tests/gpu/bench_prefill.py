@@ -1,5 +1,6 @@
 """Prefill throughput and kernel breakdown (Modal: parity --args "bench_prefill.py [tokens] [chunk]")."""
 
+import os
 import sys
 import time
 
@@ -20,7 +21,7 @@ torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
 cfg = InklingConfig.from_pretrained(path)
 w = load_weights(cfg, path)
 cache = InklingCache(cfg, CacheSpec(slots=1, max_ctx=n + 64, ring=cfg.sliding_window + 64))
-model = FusedModel(cfg, w)
+model = FusedModel(cfg, w, dense_fp8=os.environ.get("DENSE_FP8") == "1")
 ws = model.workspace(chunk, 1)
 ids = torch.randint(1000, 60000, (n,)).tolist()
 

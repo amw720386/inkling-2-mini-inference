@@ -83,6 +83,12 @@ class Workspace:
         self.part_ml = z(t, cfg.num_heads, n_split, 2, dt=f32) if n_split > 1 else None
         self._prefill_rows = None
 
+    def proj_big(self, t: int, ncols: int) -> torch.Tensor:
+        """Prefill projection output (FP8 path), grown on demand."""
+        if getattr(self, "_proj_big", None) is None or self._proj_big.numel() < t * ncols:
+            self._proj_big = torch.empty(t * ncols, dtype=torch.bfloat16, device=self.blk.device)
+        return self._proj_big[:t * ncols].view(t, ncols)
+
     def prefill_rows(self, n: int, h: int) -> torch.Tensor:
         if self._prefill_rows is None or self._prefill_rows.shape[0] < n:
             self._prefill_rows = torch.empty(n, h, dtype=torch.float32, device=self.blk.device)
@@ -93,7 +99,8 @@ class FusedModel:
     def __init__(self, cfg: InklingConfig, weights: ModelWeights, dense_fp8: bool = False,
                  fp4_prefill: bool | None = None):
         """dense_fp8: row-scaled E4M3 copies of the attention projections and the LM head for decode-sized
-        GEMVs (halves their bytes; lossy w.r.t. the bf16 checkpoint, off by default). Prefill keeps bf16.
+        GEMVs and FP8 tensor-core GEMMs with row-scaled FP8 activations for prefill (lossy w.r.t. the bf16 checkpoint,
+        off by default; compact() then drops the bf16 projection weights).
         fp4_prefill: multi-token steps above the decode sizes run the NVFP4 expert layers on the FP4 tensor
         cores with NVFP4-quantized activations (ops/moe_fp4.py; Triton >= 3.6). Default: env INKLING_FP4_PREFILL."""
         self.cfg, self.w = cfg, weights
@@ -161,11 +168,16 @@ class FusedModel:
         per-layer weight replaces them). The reference model cannot use these weights afterwards."""
         for lw in self.w.layers:
             lw.w_all = lw.w_qgrs = lw.wk = lw.wv = lw.kv_dyn_proj = None
+            if self.dense_fp8:  # every step size reads the FP8 copies
+                lw.wo = None
+        if self.dense_fp8:
+            self.w_proj = None
         torch.cuda.empty_cache()
 
     def _w(self, layer: int, name: str, T: int):
-        """The projection weight for a T-token step (FP8 copy for decode-sized steps when enabled)."""
-        if self.dense_fp8 and T <= 16:
+        """The projection weight for a T-token step: the FP8 copy when enabled (GEMV for decode-sized steps, FP8
+        GEMM for prefill)."""
+        if self.dense_fp8:
             return self.fp8[(layer, name)]
         return getattr(self.w.layers[layer], name)
 
@@ -239,6 +251,16 @@ class FusedModel:
                 proj = ws.proj[:T, :ncols]
                 x3 = xn[:1].expand(3, -1, -1) if shared else xn
                 seg_gemv(x3, self.w_proj_dec[layer], proj, (self.seg_k, self.seg_v, self.seg_dk, self.seg_dv))
+            elif self.dense_fp8:  # prefill, FP8 tensor cores on the segments (row-scaled activations)
+                wb = self.w_proj_dec[layer]
+                proj = ws.proj_big(T, ncols)
+                segs = [(0, 0, self.seg_k), (1, self.seg_k, self.seg_v), (2, self.seg_v, self.seg_dk)]
+                if not local:
+                    segs += [(1, self.seg_dk, self.seg_dv), (2, self.seg_dv, self.seg_end)]
+                if shared:
+                    segs = [(0, 0, ncols)]
+                for j, a, b in segs:
+                    dense_mm(xn[j], wb.rows(a, b), proj[:, a:b])
             else:  # prefill: cuBLAS on the segments
                 wb = self.w_proj[layer]
                 if shared:

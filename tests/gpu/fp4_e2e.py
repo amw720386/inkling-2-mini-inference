@@ -1,4 +1,4 @@
-"""End-to-end effect of fp4_prefill on the fused model (Modal: parity --args "fp4_e2e.py [tokens]").
+"""End-to-end effect of fp4_prefill and dense_fp8 prefill on the fused model (Modal: parity --args "fp4_e2e.py [tokens]").
 
 Prefills natural text (stdlib docstrings) with all logits and compares:
   bf16 chunk 1024 vs bf16 chunk 512    the bf16 noise floor (batch-shape differences only)
@@ -40,12 +40,13 @@ ids = ids[:n]
 cfg = InklingConfig.from_pretrained(path)
 w = load_weights(cfg, path)
 cache = InklingCache(cfg, CacheSpec(slots=1, max_ctx=n + 64, ring=cfg.sliding_window + 64))
-model = FusedModel(cfg, w, fp4_prefill=False)
+model = FusedModel(cfg, w, fp4_prefill=False, dense_fp8=True)  # toggled per run below
 ws = model.workspace(1024, 1024)
 
 
-def run(chunk, fp4):
+def run(chunk, fp4, fp8=False):
     model.fp4_prefill = fp4
+    model.dense_fp8 = fp8
     cache.reset_slot(0)
     out = []
     for s in range(0, n, chunk):
@@ -70,7 +71,9 @@ def nll(a):
 base = run(1024, False)
 base512 = run(512, False)
 fp4 = run(1024, True)
+fp8 = run(1024, False, True)
 print(f"{n} tokens of natural text")
 compare("bf16 chunk1024 vs chunk512 (noise floor)", base512, base)
 compare("fp4 vs bf16", fp4, base)
-print(f"NLL bf16 {nll(base):.4f} | bf16 chunk512 {nll(base512):.4f} | fp4 {nll(fp4):.4f}")
+compare("dense_fp8 (FP8 projection GEMMs) vs bf16", fp8, base)
+print(f"NLL bf16 {nll(base):.4f} | bf16 chunk512 {nll(base512):.4f} | fp4 {nll(fp4):.4f} | dense_fp8 {nll(fp8):.4f}")

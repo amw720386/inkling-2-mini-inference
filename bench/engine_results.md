@@ -10,10 +10,12 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
 | bf16 | 161.6 tok/s | 283.4 tok/s | 149.7 tok/s | 250.3 tok/s |
-| `dense_fp8` | 183.1 tok/s | 288.8 tok/s | 174.2 tok/s | 265.0 tok/s |
+| `dense_fp8` | 190.7 tok/s | 310.5 tok/s | 184.0 tok/s | 270.5 tok/s |
 
-(2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation: bf16 160.0 / 284.6, `dense_fp8`
-188.5 / 281.0. Separate Modal machines differ by a few percent in decode.)
+(2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
+Modal machines differ by a few percent in decode. `dense_fp8` now reads the FP8 copies at every step size, including
+verify steps of 17-32 tokens that used bf16 before (183.1 / 288.8 then), and uses FP8 GEMMs for prefill; temperature 1
+DSpark 237.6 tok/s, 8k prefill 24.8k tok/s.)
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
@@ -104,6 +106,12 @@ Numerics (`tests/gpu/fp4_e2e.py`, 3072 tokens of natural text, all logits): bf16
 28.3k with `fp4_prefill`. Random tokens spread over more experts and run slower (`bench_prefill.py`). The expert GEMMs run on bf16 tensor cores with fp32
 accumulation: full rate on the RTX PRO 6000, about half rate on GeForce (RTX 5090), so expect lower prefill on a 5090.
 
+`dense_fp8` prefill: the attention projections and output projection run as FP8 tensor-core GEMMs (Triton, E4M3
+activations quantized per row, the row-scaled FP8 weight copies, fp32 accumulation; `gemv_triton.fp8_mm`) instead
+of bf16 cuBLAS: 8k random tokens 560 -> 515 ms on the proxy (projection GEMMs ~110 -> 44 ms); GeForce runs FP8 at
+twice its bf16-with-fp32-accumulate rate, so the gain on a 5090 should be larger. `fp4_e2e.py`: KL 5.7e-3 vs bf16
+(noise floor 3.1e-3), NLL 0.7365 vs 0.7316. The bf16 projection weights are dropped in this mode.
+
 ## Quality
 
 GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`):
@@ -111,7 +119,7 @@ GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`)
 | | accuracy |
 |---|---:|
 | engine bf16 | 0.835 (0.840 re-run after prefill/scheduler/vision/PDL changes) |
-| engine `dense_fp8` | 0.825 |
+| engine `dense_fp8` | 0.825 (0.855 with FP8 prefill projections) |
 | engine bf16 + `fp4_prefill` | 0.850 |
 | SGLang Balanced (baseline) | 0.850 |
 | SGLang DSpark (baseline) | 0.830 |

@@ -52,14 +52,87 @@ def gemv(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
 
 
 def mm(x: torch.Tensor, w, out: torch.Tensor) -> torch.Tensor:
-    """Dense projection: Triton GEMV for decode-sized M (bf16 or Fp8Weight), cuBLAS otherwise."""
+    """Dense projection: Triton GEMV for decode-sized M (bf16 or Fp8Weight); for larger M, cuBLAS (bf16) or the
+    row-scaled FP8 GEMM (Fp8Weight)."""
     if isinstance(w, Fp8Weight):
         if x.shape[0] <= MAX_M:
             return fp8_gemv(x, w, out)
-        return torch.mm(x, (w.w8.to(torch.bfloat16) * w.scale[:, None].to(torch.bfloat16)).t(), out=out)
+        return fp8_mm(x, w, out)
     if x.shape[0] <= MAX_M and x.stride(1) == 1 and out.stride(1) == 1 and out.is_contiguous():
         return gemv(x, w, out)
     return torch.mm(x, w.t(), out=out)
+
+
+# ------------------------------------------------------------------ FP8 GEMM (prefill)
+@triton.jit
+def _quant_rows_fp8_kernel(X, sx, Q, S, K: tl.constexpr, BK: tl.constexpr):
+    """Row r of bf16 X -> E4M3 Q[r] = X[r] / S[r], S[r] = max|X[r]| / 448."""
+    r = tl.program_id(0).to(tl.int64)
+    k = tl.arange(0, BK)
+    km = k < K
+    x = tl.load(X + r * sx + k, mask=km, other=0.0).to(tl.float32)
+    s = tl.maximum(tl.max(tl.abs(x), 0), 1e-12) / 448.0
+    tl.store(Q + r * K + k, (x / s).to(tl.float8e4nv), mask=km)
+    tl.store(S + r, s)
+
+
+_MM_CONFIGS = [
+    triton.Config({"BM": bm, "BN": bn, "BK": bk}, num_warps=nw, num_stages=ns)
+    for bm in (64, 128)
+    for bn in (64, 128, 256)
+    for bk in (64, 128)
+    for nw in (4, 8)
+    for ns in (3, 4)
+    if not (bm == 128 and bn == 256 and nw == 4)
+]
+
+
+def _prune_mm(configs, named_args, **kw):
+    k = named_args["K"]
+    return [c for c in configs if k % c.kwargs["BK"] == 0]
+
+
+@triton.autotune(cache_results=True, configs=_MM_CONFIGS, key=["N", "K"], prune_configs_by={"early_config_prune": _prune_mm})
+@triton.jit
+def _fp8_mm_kernel(A, As, W, Ws, Out, M, N, K: tl.constexpr, so, BM: tl.constexpr, BN: tl.constexpr,
+                   BK: tl.constexpr, GROUP: tl.constexpr = 8):
+    """Out[M, N] (bf16) = (A8 @ W8^T) * As[row] * Ws[col]: row-scaled E4M3 operands, fp32 accumulation."""
+    pid = tl.program_id(0)
+    n_m = tl.cdiv(M, BM)
+    n_n = tl.cdiv(N, BN)
+    group = pid // (GROUP * n_n)
+    first = group * GROUP
+    size = tl.minimum(n_m - first, GROUP)
+    pm = first + (pid % (GROUP * n_n)) % size
+    pn = (pid % (GROUP * n_n)) // size
+    rm = pm * BM + tl.arange(0, BM)
+    rn = pn * BN + tl.arange(0, BN)
+    mm_ = rm < M
+    nm = rn < N
+    acc = tl.zeros((BM, BN), tl.float32)
+    for k0 in tl.range(0, K, BK):
+        kk = k0 + tl.arange(0, BK)
+        a = tl.load(A + rm.to(tl.int64)[:, None] * K + kk[None, :], mask=mm_[:, None], other=0.0)
+        w = tl.load(W + rn.to(tl.int64)[None, :] * K + kk[:, None], mask=nm[None, :], other=0.0)
+        acc = tl.dot(a, w, acc)
+    acc = acc * tl.load(As + rm, mask=mm_, other=0.0)[:, None] * tl.load(Ws + rn, mask=nm, other=0.0)[None, :]
+    tl.store(Out + rm.to(tl.int64)[:, None] * so + rn[None, :], acc.to(Out.dtype.element_ty),
+             mask=mm_[:, None] & nm[None, :])
+
+
+def fp8_mm(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
+    """out[M, N] = x[M, K] @ W^T for prefill-sized M: x quantized per row to E4M3, FP8 tensor-core GEMM (twice the
+    bf16 rate; GeForce Blackwell runs bf16 with fp32 accumulation at half rate)."""
+    m, k = x.shape
+    n = w.w8.shape[0]
+    assert x.stride(1) == 1 and out.stride(1) == 1 and w.w8.stride(0) == k
+    x8 = torch.empty(m, k, dtype=torch.float8_e4m3fn, device=x.device)
+    xs = torch.empty(m, dtype=torch.float32, device=x.device)
+    _quant_rows_fp8_kernel[(m,)](x, x.stride(0), x8, xs, K=k, BK=triton.next_power_of_2(k), num_warps=8)
+    _fp8_mm_kernel[lambda meta: (triton.cdiv(m, meta["BM"]) * triton.cdiv(n, meta["BN"]),)](
+        x8, xs, w.w8, w.scale, out, m, n, k, out.stride(0),
+    )
+    return out
 
 
 @triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
@@ -86,11 +159,17 @@ def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.
 class Fp8Weight:
     """Row-scaled E4M3 copy of a bf16 [N, K] weight: scale[r] = max|w_r| / 448."""
 
-    def __init__(self, w: torch.Tensor):
+    def __init__(self, w: torch.Tensor | None = None, *, w8=None, scale=None):
+        if w is None:  # a view (e.g. rows of another Fp8Weight)
+            self.w8, self.scale, self.shape = w8, scale, w8.shape
+            return
         amax = w.float().abs().amax(1).clamp(min=1e-12)
         self.scale = (amax / 448.0).contiguous()
         self.w8 = (w.float() / self.scale[:, None]).clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
         self.shape = w.shape
+
+    def rows(self, a: int, b: int) -> "Fp8Weight":
+        return Fp8Weight(w8=self.w8[a:b], scale=self.scale[a:b])
 
     def t(self):  # interface parity with tensors used as dense_mm weights
         raise TypeError("Fp8Weight is consumed by mm()/fp8_gemv only")

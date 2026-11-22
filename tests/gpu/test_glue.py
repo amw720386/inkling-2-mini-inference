@@ -95,3 +95,22 @@ def test_msg_gates_prefill():
     e2 = ((out32 - ref32).norm() / ref32.norm()).item()
     print("msg gates rel err (normed bf16, fp32)", e1, e2)
     assert e1 < 4e-3 and e2 < 5e-4  # bf16 rounding flips of the normed inputs feed g
+
+
+def test_fp8_mm():
+    from inkling_engine.ops.gemv_triton import Fp8Weight, fp8_mm
+
+    torch.manual_seed(3)
+    x = torch.randn(1000, 2304, device="cuda").to(torch.bfloat16)
+    w = (torch.randn(6592, 2304, device="cuda") * 0.02).to(torch.bfloat16)
+    w8 = Fp8Weight(w)
+    out = torch.empty(1000, 6592, dtype=torch.bfloat16, device="cuda")
+    fp8_mm(x, w8, out)
+    deq = (w8.w8.float() * w8.scale[:, None]).to(torch.bfloat16)
+    ref = (x.float() @ deq.float().t())
+    err = ((out.float() - ref).norm() / ref.norm()).item()
+    seg = torch.empty(1000, 512, dtype=torch.bfloat16, device="cuda")
+    fp8_mm(x, w8.rows(1024, 1536), seg)
+    err_seg = ((seg.float() - ref[:, 1024:1536]).norm() / ref[:, 1024:1536].norm()).item()
+    print("fp8_mm rel err vs dequantized-weight GEMM", err, "segment", err_seg)
+    assert err < 0.04 and err_seg < 0.04
