@@ -374,7 +374,7 @@ class GroupedScratch:
 
 def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap, up_cap, sc: GroupedScratch,
                       rows_out: torch.Tensor) -> torch.Tensor:
-    """x [T, H] bf16 (T <= 16), ids [T, k] int32, wts [T, k] fp32. Writes per-pair weighted rows
+    """x [T, H] bf16 (T <= 32), ids [T, k] int32, wts [T, k] fp32. Writes per-pair weighted rows
     rows_out [T*k, H] fp32 (pair order, like moe_decode) and returns it."""
     t, hdim = x.shape
     k = ids.shape[1]
@@ -390,14 +390,15 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else sc.counts
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else sc.counts
     act = sc.act[:p]
+    bm = 16 if t <= 16 else 32  # an expert gets at most one row per token
     wts_pair = wts.reshape(-1).float()
     _grouped_tuned[lambda m: (e, triton.cdiv(n13, m["BN"]))](
         x, x.stride(0), row_src, k, w13.weight, _scale_view(w13), f13, sc.tile_expert, starts, ends,
-        act, act.stride(0), wts_pair, row_src, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=16,
+        act, act.stride(0), wts_pair, row_src, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=bm,
     )
     _grouped_tuned[lambda m: (e, triton.cdiv(hdim, m["BN"]))](
         act, act.stride(0), sc.ident, 1, w2.weight, _scale_view(w2), f2, sc.tile_expert, starts, ends,
-        rows_out, rows_out.stride(0), wts_pair, row_src, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=16,
+        rows_out, rows_out.stride(0), wts_pair, row_src, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=bm,
     )
     return rows_out[:p]
 

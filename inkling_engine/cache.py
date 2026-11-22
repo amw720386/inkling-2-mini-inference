@@ -50,15 +50,17 @@ class InklingCache:
         self.seq_lens = torch.zeros(s, dtype=torch.int64)  # host-side bookkeeping
         self.cand = None  # speculative verify: candidate conv states, see enable_spec
 
-    def enable_spec(self, max_verify: int, device="cuda"):
-        """Buffers for the conv states after committing 1..max_verify rows of a verify call."""
-        mk = lambda t: torch.zeros(t.shape[0], max_verify, *t.shape[2:], dtype=t.dtype, device=device)
+    def enable_spec(self, max_verify: int, max_batch: int = 1, device="cuda"):
+        """Buffers for the conv states after committing 1..max_verify rows of each sequence of a verify call
+        of up to max_batch sequences: [visits, batch position, rows committed - 1, K-1, C]."""
+        mk = lambda t: torch.zeros(t.shape[0], max_batch, max_verify, *t.shape[2:], dtype=t.dtype, device=device)
         self.cand = {name: mk(getattr(self, name)) for name in ("k_conv", "v_conv", "attn_conv", "mlp_conv")}
 
-    def commit_spec(self, slot: int, n_commit: int):
-        """After a verify call of the sequence in `slot`, keep the conv states of its first n_commit rows."""
+    def commit_spec(self, slot: int, n_commit: int, b: int = 0):
+        """After a verify call, give the sequence in `slot` (batch position b) the conv states of its first
+        n_commit rows."""
         for name, cand in self.cand.items():
-            getattr(self, name)[:, slot].copy_(cand[:, n_commit - 1])
+            getattr(self, name)[:, slot].copy_(cand[:, b, n_commit - 1])
 
     def reset_slot(self, slot: int) -> None:
         for t in (self.k_conv, self.v_conv, self.attn_conv, self.mlp_conv):

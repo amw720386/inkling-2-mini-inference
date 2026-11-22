@@ -30,7 +30,7 @@ def t(fn, n=100):
 for flag in (True, False, True, False):
     pdl.ACTIVE[0] = flag
     dg = FusedDecodeGraph(eng.model, eng.cache, 1)
-    vg = {m: VerifyGraph(eng.model, eng.cache, m) for m in (2, 4, 8)}
+    vg = {m: VerifyGraph(eng.model, eng.cache, 1, m) for m in (2, 4, 8)}
     eng.drafter.graphs.clear()
     eng.drafter.commit_graphs.clear()
     eng.drafter.capture()

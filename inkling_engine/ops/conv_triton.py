@@ -123,29 +123,36 @@ def short_conv(x, state, meta, tok_seq, weight=None, static=None, dyn=None, ch_p
 
 
 @triton.jit
-def _conv_cand_kernel(X, x_stride, State, st_row, Cand, cand_stride_c, cand_row, C: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
-    """Speculative verify of one sequence: Cand[c] = the conv state after committing the first c + 1 rows
-    of the chunk X (last 3 of [old state, x_0..x_c]); the old State is left untouched."""
+def _conv_cand_kernel(X, x_stride, State, st_slot, st_row, Cand, cand_stride_b, cand_stride_c, cand_row,
+                      SeqSlot, SeqOff, C: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    """Speculative verify: for sequence b of the batch (slot SeqSlot[b], rows SeqOff[b]..), Cand[b, c] = the
+    conv state after committing its first c + 1 rows (last 3 of [old state, x_0..x_c]); State is untouched."""
     if PDL:
         tl.extra.cuda.gdc_wait()
-    cidx = tl.program_id(0)
-    pc = tl.program_id(1)
+    bq = tl.program_id(0)
+    cidx = tl.program_id(1)
+    pc = tl.program_id(2)
     ch = pc * BC + tl.arange(0, BC)
     cm = ch < C
+    slot = tl.load(SeqSlot + bq).to(tl.int64)
+    off = tl.load(SeqOff + bq).to(tl.int64)
     n = cidx + 1
     for r in tl.static_range(3):
         src = n - 3 + r
         from_x = src >= 0
-        vx = tl.load(X + src.to(tl.int64) * x_stride + ch, mask=from_x & cm, other=0.0)
-        vs = tl.load(State + (3 + src).to(tl.int64) * st_row + ch, mask=(~from_x) & cm, other=0.0)
-        tl.store(Cand + cidx * cand_stride_c + r * cand_row + ch, tl.where(from_x, vx, vs), mask=cm)
+        vx = tl.load(X + (off + src).to(tl.int64) * x_stride + ch, mask=from_x & cm, other=0.0)
+        vs = tl.load(State + slot * st_slot + (3 + src).to(tl.int64) * st_row + ch, mask=(~from_x) & cm, other=0.0)
+        tl.store(Cand + bq * cand_stride_b + cidx * cand_stride_c + r * cand_row + ch, tl.where(from_x, vx, vs),
+                 mask=cm)
 
 
-def conv_candidates(x, state_slot, cand):
-    """x [m, C] chunk inputs; state_slot [3, C] (the slot's current state); cand [>=m, 3, C]."""
-    m, c = x.shape
-    _conv_cand_kernel[(m, triton.cdiv(c, 512))](x, x.stride(0), state_slot, state_slot.stride(0), cand,
-                                                cand.stride(0), cand.stride(1), c, BC=512, num_warps=4)
+def conv_candidates(x, state, cand, seq_slot, seq_off, n_seq: int, m: int):
+    """x [n_seq * m, C] chunk inputs (sequence b at rows seq_off[b]..+m); state [slots, 3, C];
+    cand [>= n_seq, >= m, 3, C]."""
+    c = x.shape[1]
+    _conv_cand_kernel[(n_seq, m, triton.cdiv(c, 512))](
+        x, x.stride(0), state, state.stride(0), state.stride(1), cand, cand.stride(0), cand.stride(1),
+        cand.stride(2), seq_slot, seq_off, c, BC=512, num_warps=4)
 
 
 _pdl_enable(_conv_out_kernel, _conv_state_kernel, _conv_cand_kernel)

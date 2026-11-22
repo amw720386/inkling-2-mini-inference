@@ -22,6 +22,11 @@ Scheduler (`tests/gpu/bench_concurrency.py`, 4 slots, 16k context, DSpark on): 4
 tokens, ~300 tok/s aggregate including prefill (SGLang Balanced c4: 269); 2 concurrent: 230 tok/s. Each slot has its own
 draft context, so whichever request is left decoding alone speculates.
 
+Batched speculation (`tests/gpu/bench_batched_spec.py`, requests stopping at EOS, up to 384 tokens): with 2
+concurrent requests, plain batched 212 tok/s, batched DSpark 252, adaptive 250; with 4, all three ~300 tok/s
+(four sequential drafts per round eat the gain). The scheduler speculates in a batched step only when the
+calibrated costs and each request's recent acceptance predict more tokens/ms than a plain batched step.
+
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
 
 ## Long context (`tests/gpu/longctx.py`, `kv_fp8`)

@@ -27,7 +27,7 @@ from .ops.moe_triton import GroupedScratch, moe_decode, moe_grouped_small, moe_p
 from .weights import ModelWeights
 
 DIRECT_CACHE_MAX_NEW = 64  # ring slack: chunks this small may write the cache before attention
-DECODE_MOE_MAX_TOKENS = 16
+DECODE_MOE_MAX_TOKENS = 32  # batched verify: up to 4 sequences x 8 tokens
 GROUPED_MIN_TOKENS = 4  # below this the per-(token, expert) GEMV is faster
 
 
@@ -138,7 +138,8 @@ class FusedModel:
     def forward(self, batch: Batch, cache: InklingCache, ws: Workspace, meta: StepMeta | None = None,
                 decode_state: bool | None = None, n_out: int | None = None, verify: bool = False,
                 embed_feats: tuple | None = None):
-        """verify: one sequence whose conv states must stay rollback-able; candidates go to cache.cand."""
+        """verify: every sequence has the same number of new tokens and its conv states must stay rollback-able;
+        candidates go to cache.cand (batch position = sequence index)."""
         c, w = self.cfg, self.w
         meta = meta or self.step_meta(batch)
         T = batch.num_tokens
@@ -146,8 +147,8 @@ class FusedModel:
         if decode_state is None:
             decode_state = all(s.n == 1 for s in batch.seqs) and not verify
         if verify:
-            assert len(batch.seqs) == 1 and not decode_state
-            vslot = batch.seqs[0].slot
+            assert not decode_state and len({sq.n for sq in batch.seqs}) == 1
+            vm, vk = batch.seqs[0].n, len(batch.seqs)
         direct_cache = meta.max_new <= DIRECT_CACHE_MAX_NEW
         pos = batch.positions
         blk = ws.blk[:, :T]
@@ -222,8 +223,8 @@ class FusedModel:
                         cache_kv=(kc, vc) if direct_cache else None, ring=ring, decode_state=decode_state,
                         kv_fp8=(not local) and kc.dtype == torch.float8_e4m3fn)
             if not decode_state:
-                self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else conv_candidates(k_lin, cache.k_conv[vi, vslot], cache.cand['k_conv'][vi])
-                self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else conv_candidates(v_lin, cache.v_conv[vi, vslot], cache.cand['v_conv'][vi])
+                self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else conv_candidates(k_lin, cache.k_conv[vi], cache.cand['k_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
+                self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else conv_candidates(v_lin, cache.v_conv[vi], cache.cand['v_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
 
             # ---- attention
             sinks = qp[:, 2 * c.q_dim + c.rel_dim:2 * c.q_dim + c.rel_dim + c.num_heads]
@@ -246,7 +247,7 @@ class FusedModel:
                          None if msgs else lw.mlp_norm, mi_out, meta.local, meta.tok_seq, c,
                          boundary=boundary, decode_state=decode_state)
             if not decode_state:
-                self._conv_state(o, cache.attn_conv[vi], meta) if not verify else conv_candidates(o, cache.attn_conv[vi, vslot], cache.cand['attn_conv'][vi])
+                self._conv_state(o, cache.attn_conv[vi], meta) if not verify else conv_candidates(o, cache.attn_conv[vi], cache.cand['attn_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
             if boundary:
                 nb += 1
             x = ws.x[:T]
@@ -275,7 +276,7 @@ class FusedModel:
                 fk.post_mlp(rows, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
                             decode_state=False)
             if not decode_state:
-                self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else conv_candidates(m, cache.mlp_conv[vi, vslot], cache.cand['mlp_conv'][vi])
+                self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else conv_candidates(m, cache.mlp_conv[vi], cache.cand['mlp_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
 
         hidden = ws.hidden[:T]
         fk.depth_attn(blk, nb + 1, w.output_query, hidden[None], norm_w=w.final_norm[None])

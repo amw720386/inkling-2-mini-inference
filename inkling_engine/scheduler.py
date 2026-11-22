@@ -35,6 +35,7 @@ class Request:
     out: list = field(default_factory=list)
     gen: torch.Generator | None = None
     spec_ok: bool = False
+    accept_ema: float = 2.0  # recent accepted drafts per round (batched-speculation decision)
     t_decode: float = 0.0
     t_start: float = 0.0
     prefill_gen: object = None
@@ -48,6 +49,9 @@ class Scheduler:
         self.waiting: list[Request] = []
         self.prefilling: list[Request] = []  # slot assigned, prompt being processed chunk by chunk
         self.active: dict[int, Request] = {}
+        self.batched_spec = True  # speculate in batched steps too (each request drafts in its slot)
+        self.counters = {"spec": [0, 0.0], "batched_spec": [0, 0.0], "batched": [0, 0.0], "prefill": [0, 0.0],
+                         "batch_sizes": {}}
         self.thread = threading.Thread(target=self._loop, daemon=True, name="inkling-scheduler")
         self.thread.start()
 
@@ -80,15 +84,29 @@ class Scheduler:
                     pass
                 self._admit()
                 if self.prefilling:  # one prompt chunk, then one decode step for the others
+                    t0 = time.time()
                     self._prefill_step(self.prefilling[0])
+                    self.counters["prefill"][0] += 1
+                    self.counters["prefill"][1] += time.time() - t0
                 if not self.active:
                     continue
                 try:
-                    lone = next(iter(self.active.values())) if len(self.active) == 1 else None
-                    if lone is not None and lone.spec_ok:
-                        self._spec_step(lone)
+                    reqs = [self.active[s_] for s_ in sorted(self.active)]
+                    t0 = time.time()
+                    if len(reqs) == 1 and reqs[0].spec_ok:
+                        kind = "spec"
+                        self._spec_step(reqs[0])
+                    elif self.batched_spec and all(r.spec_ok for r in reqs) and self._spec_pays(reqs):
+                        kind = "batched_spec"
+                        self._batched_spec_step(reqs)
                     else:
+                        kind = "batched"
                         self._batched_step()
+                    c = self.counters[kind]
+                    c[0] += 1
+                    c[1] += time.time() - t0
+                    bs = self.counters["batch_sizes"]
+                    bs[len(reqs)] = bs.get(len(reqs), 0) + 1
                 except Exception as exc:  # fail the running requests, keep serving
                     for req in list(self.active.values()):
                         req.error = exc
@@ -177,12 +195,32 @@ class Scheduler:
     # ---------------------------------------------------------------- steps
     def _spec_step(self, req: Request):
         new, commit = self.e.spec_round(req.out[-1], req.P, req.sp, req.gen, req.stats, slot=req.slot)
+        req.accept_ema = 0.7 * req.accept_ema + 0.3 * (commit - 1)
         req.P += commit
         for t in new:
             req.out.append(t)
             req.on_token(t)
             if self._check_done(req):
                 return
+
+    def _spec_pays(self, reqs) -> bool:
+        """Speculate in a batched step only when its expected tokens/ms beat a batched plain step. Every so
+        often speculate anyway, so the acceptance estimates stay current."""
+        if not self.e.verify_costs:
+            return True
+        self.probe = getattr(self, "probe", 0) + 1
+        spec_rate, plain_rate = self.e.batched_spec_rate([r.accept_ema for r in reqs])
+        return spec_rate > plain_rate or self.probe % 16 == 0
+
+    def _batched_spec_step(self, reqs):
+        for r, (new, commit) in zip(reqs, self.e.batched_spec_round(reqs)):
+            r.accept_ema = 0.7 * r.accept_ema + 0.3 * (commit - 1)
+            r.P += commit
+            for t in new:
+                r.out.append(t)
+                r.on_token(t)
+                if self._check_done(r):
+                    break
 
     def _batched_step(self):
         e = self.e

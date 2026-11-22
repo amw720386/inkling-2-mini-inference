@@ -24,6 +24,7 @@ from .sampling import Sampling, accept_sampled, probs, sample
 from .weights import load_weights
 
 VERIFY_WIDTHS = (2, 4, 8)
+GAMMA = 7  # drafted tokens per DSpark round
 IMAGE_TOKEN_ID = 200054
 
 
@@ -53,18 +54,21 @@ class GenStats:
 
 
 class VerifyGraph:
-    """Captured target forward of one sequence's anchor + (m - 1) drafts, all rows' logits and taps."""
+    """Captured target forward of k sequences, each its anchor + (m - 1) drafts, in any slots: all rows'
+    logits and taps. Conv-state candidates go to cache.cand at batch positions 0..k-1."""
 
-    def __init__(self, model: FusedModel, cache: InklingCache, m: int, slot: int = 0, n_split_global: int = 16):
-        self.model, self.cache, self.m, self.slot = model, cache, m, slot
-        seqs = [SeqChunk(slot=slot, start=0, n=m, want_logits="all")]
-        self.batch = Batch(seqs=seqs, input_ids=torch.zeros(m, dtype=torch.int64, device="cuda"),
-                           positions=torch.arange(m, dtype=torch.int64, device="cuda"), offsets=[0],
-                           logit_rows=torch.arange(m, device="cuda"))
+    def __init__(self, model: FusedModel, cache: InklingCache, k: int, m: int, n_split_global: int = 16):
+        self.model, self.cache, self.k, self.m = model, cache, k, m
+        seqs = [SeqChunk(slot=i, start=0, n=m, want_logits="all") for i in range(k)]
+        t = k * m
+        self.batch = Batch(seqs=seqs, input_ids=torch.zeros(t, dtype=torch.int64, device="cuda"),
+                           positions=torch.arange(t, dtype=torch.int64, device="cuda") % m,
+                           offsets=[i * m for i in range(k)], logit_rows=torch.arange(t, device="cuda"))
         self.meta = build_step_meta(self.batch, 4, n_split_global)
-        self.ws = model.workspace(m, m, 16)
-        self.base_pos = torch.arange(m, dtype=torch.int64, device="cuda")
-        snap = [(t, t[:, slot].clone()) for t in (cache.k_conv, cache.v_conv, cache.attn_conv, cache.mlp_conv)]
+        self.ws = model.workspace(t, t, 16)
+        self.base_pos = torch.arange(m, dtype=torch.int64)
+        sl = slice(0, k)
+        snap = [(x, x[:, sl].clone()) for x in (cache.k_conv, cache.v_conv, cache.attn_conv, cache.mlp_conv)]
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -74,18 +78,21 @@ class VerifyGraph:
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph):
             self.logits = self._run()
-        for t, v in snap:
-            t[:, slot].copy_(v)
+        for x, v in snap:
+            x[:, sl].copy_(v)
 
     def _run(self):
         return self.model.forward(self.batch, self.cache, self.ws, self.meta, verify=True)
 
-    def run(self, tokens: torch.Tensor, P: int):
+    def run(self, tokens: torch.Tensor, slots: list[int], positions: list[int]):
+        """tokens [k * m] (sequence b at rows b*m..); slots / positions (of each anchor) per sequence."""
         self.batch.input_ids.copy_(tokens)
-        torch.add(self.base_pos, P, out=self.batch.positions)
-        self.meta.local.seq_start.fill_(P)
+        pos = (torch.tensor(positions, dtype=torch.int64)[:, None] + self.base_pos[None]).reshape(-1)
+        self.batch.positions.copy_(pos, non_blocking=True)
+        self.meta.local.seq_slot.copy_(torch.tensor(slots, dtype=torch.int32), non_blocking=True)
+        self.meta.local.seq_start.copy_(torch.tensor(positions, dtype=torch.int32), non_blocking=True)
         self.graph.replay()
-        return self.logits, self.ws.taps[:self.m]
+        return self.logits, self.ws.taps[:self.k * self.m]
 
 
 class Engine:
@@ -114,16 +121,17 @@ class Engine:
         if spec:
             from .dspark import Drafter
             self.model.write_taps = True
-            self.cache.enable_spec(max(VERIFY_WIDTHS))
+            self.cache.enable_spec(max(VERIFY_WIDTHS), slots)
             self.drafter = Drafter(model_dir, self.w, max_ctx, slots=slots)
         self.decode_graphs = {bs: FusedDecodeGraph(self.model, self.cache, bs, capture=graphs)
                               for bs in range(1, slots + 1)}
         self.decode_graph = self.decode_graphs[1]
-        self.verify = ({slot: {m: VerifyGraph(self.model, self.cache, m, slot=slot) for m in VERIFY_WIDTHS}
-                        for slot in range(slots)} if spec and graphs else {})
+        self.verify = ({(k, m): VerifyGraph(self.model, self.cache, k, m) for k in range(1, slots + 1)
+                        for m in VERIFY_WIDTHS} if spec and graphs else {})
         if spec and graphs:
             self.drafter.capture()
         self.gamma = 2.0
+        self.draft_cost, self.verify_costs, self.decode_costs = 1.0, {}, {}
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
         self.state_ids: list[int] = []  # tokens whose positions the cache holds
@@ -150,12 +158,27 @@ class Engine:
             return e0.elapsed_time(e1) / n
 
         draft = t(lambda: self.drafter.graphs[(self.drafter.buckets[0], 0)].replay())
-        snap = [x[:, 0].clone() for x in (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)]
-        costs = {m: draft + t(lambda g=g: g.graph.replay()) for m, g in self.verify[0].items()}
-        for x, v in zip((self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv), snap):
-            x[:, 0].copy_(v)
+        convs = (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)
+        snap = [x.clone() for x in convs]
+        costs = {m: draft + t(lambda g=self.verify[(1, m)]: g.graph.replay()) for m in VERIFY_WIDTHS}
+        # for the scheduler's choice between batched speculation and batched plain decode
+        self.draft_cost = draft
+        self.verify_costs = {km: t(lambda g=g: g.graph.replay(), 10) for km, g in self.verify.items()}
+        self.decode_costs = {k: t(lambda g=g: g.graph.replay(), 10) for k, g in self.decode_graphs.items()}
+        for x, v in zip(convs, snap):
+            x.copy_(v)
         self.drafter.reset()
         return costs
+
+    def batched_spec_rate(self, accept_estimates: list[float]) -> tuple[float, float]:
+        """(expected tokens/ms of a batched DSpark round, tokens/ms of a batched plain step) for requests
+        with these expected accepted drafts per round."""
+        k = len(accept_estimates)
+        best = 0.0
+        for m in VERIFY_WIDTHS:
+            tokens = sum(1.0 + min(a, m - 1) for a in accept_estimates)
+            best = max(best, tokens / (k * self.draft_cost + self.verify_costs[(k, m)]))
+        return best, k / self.decode_costs[k]
 
     def _expected(self, conf: list[float], m: int) -> float:
         """Expected accepted drafts of a width-m verify: leading products of conf ** gamma."""
@@ -335,7 +358,7 @@ class Engine:
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
-        logits, taps = self.verify[slot][m].run(vt, P)
+        logits, taps = self.verify[(1, m)].run(vt, [slot], [P])
         if sp.temperature <= 0:
             target = logits.argmax(-1)
             acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
@@ -345,13 +368,63 @@ class Engine:
             acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
         commit = acc + 1
         self._observe(confs, m, acc)
-        self.cache.commit_spec(slot, commit)
+        self.cache.commit_spec(slot, commit, 0)
         self.drafter.commit(taps[:commit], P, slot=slot)
         if st is not None:
             st.rounds += 1
             st.accepted += acc
             st.widths[m] = st.widths.get(m, 0) + 1
         return drafted[:acc] + [nxt], commit
+
+    def batched_spec_round(self, reqs: list) -> list[tuple[list[int], int]]:
+        """One DSpark round for several sequences at once: each drafts in its slot, one verify graph checks
+        them all (common width), and each accepts independently. reqs: objects with .slot, .P, .out (last =
+        anchor), .sp, .gen, .stats. Returns per request (new tokens, rows committed)."""
+        d = self.drafter
+        drafts = []
+        for r in reqs:
+            tok, conf = d.draft(r.out[-1], r.P, max(r.sp.temperature, 0.0), slot=r.slot)
+            q = d.draft_distribution(GAMMA, r.sp.temperature) if r.sp.temperature > 0 else (None, None)
+            drafts.append((tok.clone(), conf.clone(), q[0].clone() if q[0] is not None else None,
+                           q[1].clone() if q[1] is not None else None))
+        info = torch.cat([torch.cat([c, t.float()]) for t, c, _, _ in drafts]).tolist()  # one sync
+        k = len(reqs)
+        confs = [info[i * 14:i * 14 + 7] for i in range(k)]
+        drafted = [[int(x) for x in info[i * 14 + 7:i * 14 + 14]] for i in range(k)]
+        m = max(self._pick_width(c) for c in confs)
+        vt = torch.empty(k * m, dtype=torch.int64, device="cuda")
+        for i, r in enumerate(reqs):
+            vt[i * m] = r.out[-1]
+            vt[i * m + 1:(i + 1) * m].copy_(drafts[i][0][:m - 1])
+        logits, taps = self.verify[(k, m)].run(vt, [r.slot for r in reqs], [r.P for r in reqs])
+        lg = logits.view(k, m, -1)
+        greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
+        res = {}
+        if greedy:
+            gi = torch.tensor(greedy, device=lg.device)
+            target = lg[gi].argmax(-1)  # [g, m]
+            dr = torch.stack([drafts[i][0][:m - 1] for i in greedy])
+            acc = (dr == target[:, :m - 1]).int().cumprod(1).sum(1)
+            flat = torch.cat([acc[:, None], target.int()], 1).tolist()  # one sync
+            for j, i in enumerate(greedy):
+                a = flat[j][0]
+                res[i] = (a, flat[j][1 + a])
+        for i, r in enumerate(reqs):
+            if i not in res:
+                _, _, cand, q = drafts[i]
+                res[i] = accept_sampled(drafts[i][0][:m - 1], lg[i], cand[:m - 1], q[:m - 1], r.sp, r.gen)
+        out = []
+        for i, r in enumerate(reqs):
+            a, nxt = res[i]
+            commit = a + 1
+            self._observe(confs[i], m, a)
+            self.cache.commit_spec(r.slot, commit, i)
+            d.commit(taps[i * m:i * m + commit], r.P, slot=r.slot)
+            r.stats.rounds += 1
+            r.stats.accepted += a
+            r.stats.widths[m] = r.stats.widths.get(m, 0) + 1
+            out.append((drafted[i][:a] + [nxt], commit))
+        return out
 
     def _accept_sampled(self, drafts, target_logits, sp, gen):
         cand, q = self.drafter.draft_distribution(drafts.shape[0], sp.temperature)

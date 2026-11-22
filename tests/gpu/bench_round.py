@@ -39,14 +39,14 @@ eng.drafter.P.fill_(P)
 g = eng.drafter.graphs[(next(b for b in eng.drafter.buckets if b >= P + 8), 0)]
 print(f"draft             {t(lambda: g.replay()):.2f} ms")
 print(f"drafter commit(4) {t(lambda: eng.drafter.commit_graphs[(4, 0)].replay()):.2f} ms")
-for m, vg in eng.verify[0].items():
+for m, vg in ((m, eng.verify[(1, m)]) for m in (2, 4, 8)):
     print(f"verify m={m}        {t(lambda: vg.graph.replay()):.2f} ms")
 print(f"commit_spec       {t(lambda: eng.cache.commit_spec(0, 2)):.3f} ms")
 
 if prof_w:
     from torch.profiler import ProfilerActivity, profile
 
-    vg = eng.verify[0][prof_w]
+    vg = eng.verify[(1, prof_w)]
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
         for _ in range(10):
             vg.graph.replay()
