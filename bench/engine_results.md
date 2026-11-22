@@ -134,6 +134,11 @@ of bf16 cuBLAS: 8k random tokens 560 -> 515 ms on the proxy (projection GEMMs ~1
 twice its bf16-with-fp32-accumulate rate, so the gain on a 5090 should be larger. `fp4_e2e.py`: KL 5.7e-3 vs bf16
 (noise floor 3.1e-3), NLL 0.7365 vs 0.7316. The bf16 projection weights are dropped in this mode.
 
+NVFP4 dense weights (simulated, `tests/gpu/fp4_dense_sim.py`: attention projections, output projection and LM head
+rounded through NVFP4 and back; 3072 tokens of natural text): KL 1.45e-2 vs the checkpoint, NLL 0.7409 vs 0.7316
+(row-scaled FP8 as in `dense_fp8`: KL 4.9e-3, NLL 0.7366; bf16 noise floor KL 3.1e-3). It would halve the FP8 copies'
+bytes again (an estimated ~12% faster decode) at three times FP8's error; not implemented.
+
 ## Quality
 
 GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`):
