@@ -259,6 +259,27 @@ def stop_strings(body: dict) -> list[str]:
     return [x for x in stop if isinstance(x, str) and x]
 
 
+def requested_logprobs(body: dict, chat: bool) -> int | None:
+    """Alternatives per token to report, or None: chat uses logprobs (bool) + top_logprobs, completions an int."""
+    if chat:
+        return int(body.get("top_logprobs") or 0) if body.get("logprobs") else None
+    lp = body.get("logprobs")
+    return None if lp is None or lp is False else int(lp)
+
+
+def logprobs_obj(tok, entries, chat: bool):
+    """OpenAI logprobs object for [(token id, logprob, [(alt id, logprob)])]."""
+    text = lambda i: tok.decode([i], skip_special_tokens=False)  # noqa: E731
+    if chat:
+        def one(i, lp):
+            t = text(i)
+            return {"token": t, "logprob": lp, "bytes": list(t.encode("utf-8"))}
+        return {"content": [{**one(i, lp), "top_logprobs": [one(a, alp) for a, alp in top]}
+                            for i, lp, top in entries]}
+    return {"tokens": [text(i) for i, _, _ in entries], "token_logprobs": [lp for _, lp, _ in entries],
+            "top_logprobs": [{text(a): alp for a, alp in top} for _, _, top in entries]}
+
+
 def build_app(server: Server):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, StreamingResponse
@@ -291,7 +312,19 @@ def build_app(server: Server):
                 loop.call_soon_threadsafe(q.put_nowait, t)
 
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
-        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats)
+        n_lp = requested_logprobs(body, chat)
+        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats,
+                                  logprobs=n_lp)
+        lp_sent = 0
+
+        def new_lps():  # logprob entries of the tokens consumed since the last delta
+            nonlocal lp_sent
+            if n_lp is None:
+                return None
+            n = min(len(toks), len(req.lp))
+            out = [(toks[j], *req.lp[j]) for j in range(lp_sent, n)]
+            lp_sent = n
+            return out
         split = Splitter()
         stops = stop_strings(body)
         hold = max((len(x) for x in stops), default=1) - 1  # chars kept back while a stop string may be forming
@@ -311,7 +344,7 @@ def build_app(server: Server):
                         raise req.error
                     tail = "" if stopped else text[emitted:]
                     r, c, calls = feed(tail, final=True)
-                    yield ("delta", r, c, calls)
+                    yield ("delta", r, c, calls, new_lps())
                     yield ("end", list(out_tokens), req.stats, rid, created, stopped)
                     return
                 if stopped:
@@ -330,7 +363,7 @@ def build_app(server: Server):
                 delta, emitted = text[emitted:end], max(emitted, end)
                 r, c, calls = feed(delta)
                 if r or c or calls:
-                    yield ("delta", r, c, calls)
+                    yield ("delta", r, c, calls, new_lps())
         finally:
             if not req.done.is_set():  # the client went away (generator closed): stop generating
                 req.cancel.set()
@@ -366,8 +399,8 @@ def build_app(server: Server):
             async def sse():
                 async for ev in generate(ids, body, chat, image_feats):
                     if ev[0] == "delta":
-                        _, r, c, calls = ev
-                        if not (r or c or calls):
+                        _, r, c, calls, lps = ev
+                        if not (r or c or calls or lps):
                             continue
                         if chat:
                             delta = {}
@@ -381,6 +414,8 @@ def build_app(server: Server):
                             choice = {"index": 0, "delta": delta, "finish_reason": None}
                         else:
                             choice = {"index": 0, "text": c, "finish_reason": None}
+                        if lps is not None:
+                            choice["logprobs"] = logprobs_obj(server.tok, lps, chat)
                         yield f"data: {json.dumps({'object': obj + '.chunk', 'choices': [choice], 'model': server.model_id})}\n\n"
                     else:
                         _, out, st, rid, created, stopped = ev
@@ -390,13 +425,15 @@ def build_app(server: Server):
                         yield f"data: {json.dumps({'id': rid, 'object': obj + '.chunk', 'created': created, 'model': server.model_id, 'choices': [choice], 'usage': server.usage(ids, out, st)})}\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(sse(), media_type="text/event-stream")
-        reasoning, content, calls = [], [], []
+        reasoning, content, calls, lps = [], [], [], None
         final = None
         async for ev in generate(ids, body, chat, image_feats):
             if ev[0] == "delta":
                 reasoning.append(ev[1])
                 content.append(ev[2])
                 calls += ev[3] or []
+                if ev[4] is not None:
+                    lps = (lps or []) + ev[4]
             else:
                 final = ev
         _, out, st, rid, created, stopped = final
@@ -411,6 +448,8 @@ def build_app(server: Server):
             choice = {"index": 0, "message": msg, "finish_reason": fin}
         else:
             choice = {"index": 0, "text": "".join(content), "finish_reason": fin}
+        if lps is not None:
+            choice["logprobs"] = logprobs_obj(server.tok, lps, chat)
         return JSONResponse({"id": rid, "object": obj, "created": created, "model": server.model_id,
                              "choices": [choice], "usage": server.usage(ids, out, st),
                              "timings": {"prefill_s": st.prefill_s, "decode_s": st.decode_s,

@@ -40,6 +40,20 @@ class Request:
     t_start: float = 0.0
     prefill_gen: object = None
     image_feats: object = None
+    logprobs: int | None = None  # report each token's logprob and this many alternatives (no speculation)
+    lp: list = field(default_factory=list)  # per output token: (logprob, [(id, logprob), ...])
+
+
+def token_logprobs(logits: torch.Tensor, tok: int, k: int):
+    """(logprob of tok, top-k [(id, logprob)]) under the model's distribution (softcapped logits, before
+    temperature / top-p, like OpenAI and vLLM's default)."""
+    lp = torch.log_softmax(logits.reshape(-1).float(), -1)
+    if k > 0:
+        v, i = torch.topk(lp, k)
+        top = list(zip(i.tolist(), v.tolist()))
+    else:
+        top = []
+    return float(lp[tok]), top
 
 
 class Scheduler:
@@ -56,8 +70,9 @@ class Scheduler:
         self.thread.start()
 
     # ------------------------------------------------------------------ API
-    def submit(self, ids, max_new, stop, sp: Sampling, on_token, image_feats=None) -> Request:
-        req = Request(list(ids), max_new, set(stop), sp, on_token, image_feats=image_feats)
+    def submit(self, ids, max_new, stop, sp: Sampling, on_token, image_feats=None, logprobs: int | None = None
+               ) -> Request:
+        req = Request(list(ids), max_new, set(stop), sp, on_token, image_feats=image_feats, logprobs=logprobs)
         self.inbox.put(req)
         return req
 
@@ -169,8 +184,10 @@ class Scheduler:
         if req.sp.seed is not None and e.drafter is not None:
             e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
         tok = sample(logits, req.sp, req.gen)
+        if req.logprobs is not None:
+            req.lp.append(token_logprobs(logits, tok, req.logprobs))
         req.stats.prefill_s = time.time() - req.t_start
-        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec
+        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec and req.logprobs is None
         req.t_decode = time.time()
         self.active[req.slot] = req
         req.on_token(tok)
@@ -236,6 +253,8 @@ class Scheduler:
         for i, r in enumerate(reqs):
             r.P += 1
             t = picks[i] if i in picks else sample(lg[i], r.sp, r.gen)
+            if r.logprobs is not None:
+                r.lp.append(token_logprobs(lg[i], t, r.logprobs))
             r.out.append(t)
             r.on_token(t)
             self._check_done(r)

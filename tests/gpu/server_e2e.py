@@ -166,5 +166,26 @@ r = requests.post(B + "/completions", json={"prompt": list(range(1000, 1000 + en
 print("too long:", r.status_code, r.json().get("error", {}).get("code"))
 ok &= r.status_code == 400 and r.json()["error"]["code"] == "context_length_exceeded"
 ok &= requests.post(B + "/completions", json={"prompt": "Hi", "max_tokens": 4}).ok
+# logprobs: completions (int) and streaming chat (logprobs + top_logprobs); greedy picks the top alternative
+r = requests.post(B + "/completions", json={"prompt": "The capital of France is", "max_tokens": 8,
+                                            "temperature": 0, "logprobs": 3}).json()
+lp = r["choices"][0]["logprobs"]
+n_out = r["usage"]["completion_tokens"]
+print("logprobs:", lp["tokens"], [round(x, 3) for x in lp["token_logprobs"]])
+ok &= len(lp["tokens"]) == len(lp["token_logprobs"]) == n_out and all(len(t) == 3 for t in lp["top_logprobs"])
+ok &= all(abs(max(t.values()) - x) < 1e-4 and x <= 0 for t, x in zip(lp["top_logprobs"], lp["token_logprobs"]))
+ok &= "".join(lp["tokens"]) == r["choices"][0]["text"]
+entries, usage = [], None
+with requests.post(B + "/chat/completions", json={"messages": [{"role": "user", "content": "Say hi."}],
+                                                  "max_tokens": 30, "logprobs": True, "top_logprobs": 2,
+                                                  "reasoning_effort": "low", "stream": True}, stream=True) as rs:
+    for line in rs.iter_lines():
+        if line.startswith(b"data: ") and line[6:] != b"[DONE]":
+            ev = json.loads(line[6:])
+            ch = ev["choices"][0]
+            entries += (ch.get("logprobs") or {}).get("content", [])
+            usage = ev.get("usage") or usage
+print("chat logprob entries:", len(entries), "completion tokens:", usage["completion_tokens"])
+ok &= len(entries) == usage["completion_tokens"] and all(len(e["top_logprobs"]) == 2 for e in entries)
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
