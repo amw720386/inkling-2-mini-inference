@@ -25,7 +25,7 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 
 | | plain decode | DSpark decode | 8k-prompt decode (plain / DSpark) | prefill (8k) |
 |---|---:|---:|---:|---:|
-| this engine, bf16 | 167 tok/s | 301 tok/s | 159 / 292 tok/s | ~25k tok/s |
+| this engine, bf16 | 165 tok/s | 321 tok/s | 155 / 308 tok/s | ~25k tok/s |
 | this engine, `dense_fp8` | 205 tok/s | 342 tok/s | 189 / 311 tok/s | ~26k tok/s |
 | this engine, bf16 + `fp4_prefill` | same | ~5% lower** | same / ~5% lower** | ~28k tok/s |
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
@@ -36,9 +36,9 @@ NVFP4 activations), see `bench/engine_results.md`.
 \* SGLang's DSpark numbers come from its own benchmark prompts (its 8k figure is a document-summary prompt with high
 acceptance), so they are not the same prompts as the rows above.
 
-Concurrent requests through the scheduler (`tests/gpu/bench_batched_spec.py`): 2 requests 301 tok/s, 4 requests
-390 tok/s aggregate (SGLang Balanced at concurrency 4: 269). Temperature 1 (the model's default), single stream:
-224 tok/s with DSpark. The default server profile (4 slots x 32k context, DSpark, vision) holds 26.4 GiB after
+Concurrent requests through the scheduler (`tests/gpu/bench_batched_spec.py`): 2 requests 372 tok/s, 4 requests
+399 tok/s aggregate (SGLang Balanced at concurrency 4: 269). Temperature 1 (the model's default), single stream:
+239 tok/s with DSpark. The default server profile (4 slots x 32k context, DSpark, vision) holds 26.4 GiB after
 start-up; a 256k-context profile fits too, which SGLang's 32 GB recipe cannot (see `bench/baseline_sglang.md`).
 Full numbers: `bench/engine_results.md`.
 
@@ -98,7 +98,7 @@ Profiles (numbers from the RTX PRO 6000 proxy, batch 1):
 
 | goal | flags | decode (plain / DSpark) | 8k prefill* | fidelity |
 |---|---|---:|---:|---|
-| checkpoint math | (none) | 167 / 301 tok/s | 533 ms | bf16 dense layers, as transformers / SGLang |
+| checkpoint math | (none) | 165 / 321 tok/s | 533 ms | bf16 dense layers, as transformers / SGLang |
 | speed | `--dense-fp8` | 205 / 342 tok/s | 506 ms | FP8 attention projections and LM head (GSM8K unchanged) |
 | long prompts on GeForce | `--dense-fp8 --fp4-prefill` | 189 / 297 tok/s | 368 ms | adds NVFP4 activations for prefill experts (DSpark acceptance a little lower) |
 | long context | `--kv-fp8 --max-ctx 262144 --slots 1` | | | FP8 cache for the full-attention layers |
@@ -128,4 +128,5 @@ modal run modal/engine_app.py::parity --args "server_e2e.py"
 - transformers (Apache-2.0): `modeling_inkling2_loop.py`, the numerical reference and NVFP4/MXFP8 dequant.
 - ingine by satellitedown (Apache-2.0, github.com/satellitedown/inkling-2-mini-abliterated-ingine): `dspark.py` is
   a port of its PyTorch DSpark reference; its kernel contracts (`native/KERNELS.md`) informed the fused decode
-  design, FP8 options and verify-width selection.
+  design, FP8 options and verify-width selection; the drafter's shortlist head and loading weights before the PDL
+  wait follow its design (the shortlist ranking here is rebuilt from public text by `tests/gpu/build_shortlist.py`).

@@ -12,6 +12,7 @@ total = torch.cuda.get_device_properties(0).total_memory
 torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
 eng = Engine(path, max_ctx=32768, spec=True)
 d = eng.drafter
+print("shortlist rows:", d.short_ids.numel())
 eng.prefill(list(range(1000, 1000 + 3000)))
 g = d.graphs[(d.buckets[0], 0)]
 for _ in range(5):

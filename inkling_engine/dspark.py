@@ -14,6 +14,7 @@ engine/ingine/dspark.py @ 44bc891, Apache-2.0), which follows vLLM's and SGLang'
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -36,6 +37,11 @@ DRAFT_CTX = 65536
 ROPE_THETA = 1e6
 EPS = 1e-6
 CANDIDATES = 1024
+# The base logits that pick each row's candidates are scored over a shortlist of the most frequent tokens (plus the
+# special tokens) instead of the whole vocabulary: data/draft_shortlist.bin ranks token ids by frequency in code and
+# English text (tests/gpu/build_shortlist.py; the idea is ingine's). 0 = the whole vocabulary.
+SHORTLIST = int(os.environ.get("INKLING_DRAFT_SHORTLIST", "32768"))
+SPECIAL_FROM = 199998  # Inkling's special tokens (chat markers, eos, pad) sit at the top of the vocabulary
 
 
 def bf(x):
@@ -92,7 +98,16 @@ class Drafter:
             })
         self.final_norm, self.mask_embed = t["norm.weight"], t["mask_embed"]
         # FP8 copies for the drafter's big GEMVs (base logits over the vocab, layer projections)
-        self.head8 = Fp8Weight(self.head)
+        V0 = self.head.shape[0]
+        rank_file = Path(__file__).parent / "data" / "draft_shortlist.bin"
+        if SHORTLIST and rank_file.exists():
+            ranked = torch.frombuffer(bytearray(rank_file.read_bytes()), dtype=torch.int32).long()
+            ids = torch.cat([ranked[:SHORTLIST], torch.arange(SPECIAL_FROM, V0)])
+            ids = torch.unique(ids[ids < V0])  # sorted, no duplicates
+            self.short_ids = ids.to(device)
+        else:
+            self.short_ids = torch.arange(V0, device=device)
+        self.head8 = Fp8Weight(self.head[self.short_ids])  # FP8 rows of the shortlist
         for L in self.layers:
             for k in ("qkv", "gate_up", "wo", "w_down"):
                 L[k] = Fp8Weight(L[k])
@@ -107,7 +122,7 @@ class Drafter:
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=device)  # noqa: E731
         self.qkv_out = z(BLOCK, self.layers[0]["qkv"].shape[0], dt=torch.bfloat16)
         self.gu_out = z(BLOCK, self.layers[0]["gate_up"].shape[0], dt=torch.bfloat16)
-        self.base_out = z(GAMMA, V, dt=torch.bfloat16)
+        self.base_out = z(GAMMA, self.short_ids.numel(), dt=torch.bfloat16)
         self.h_out = z(BLOCK, D, dt=torch.bfloat16)
         self.draft_logits = torch.full((GAMMA, V), float("-inf"), device=device)
         self.ctx = min(max_ctx, DRAFT_CTX)
@@ -244,7 +259,8 @@ class Drafter:
             res, xn = add_rms(res, m, nxt, EPS)
         h = xn[1:].contiguous()  # [7, D]
         base = dense_mm(h, self.head8, self.base_out).float()
-        cand_base, cand = base.topk(CANDIDATES, dim=-1)
+        cand_base, ci = base.topk(CANDIDATES, dim=-1)
+        cand = self.short_ids[ci]  # shortlist positions -> token ids
         rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest  # [7, 768]
         if self.fused_head:
             self.cand_buf.copy_(cand)
@@ -290,7 +306,7 @@ class Drafter:
         self.m_gu = z(BLOCK * n, self.gu_out.shape[1], dt=torch.bfloat16)
         self.m_h = z(BLOCK * n, D, dt=torch.bfloat16)
         self.m_o = z(BLOCK * n, HEADS * HEAD_DIM, dt=torch.bfloat16)
-        self.m_base = z(GAMMA * n, V, dt=torch.bfloat16)
+        self.m_base = z(GAMMA * n, self.short_ids.numel(), dt=torch.bfloat16)
         self.m_heads = [MarkovHead(GAMMA, RANK, CANDIDATES, device) for _ in range(n)]
         self.multi_graphs: dict = {}
 
@@ -322,7 +338,8 @@ class Drafter:
         base = dense_mm(h, self.head8, self.m_base[:GAMMA * k]).float()
         for i, s_ in enumerate(slots):
             r = slice(GAMMA * i, GAMMA * (i + 1))
-            cand_base, cand = base[r].topk(CANDIDATES, dim=-1)
+            cand_base, ci = base[r].topk(CANDIDATES, dim=-1)
+            cand = self.short_ids[ci]
             f = self.ctxs[s_]["f"]
             rest = torch.cat([h[r], f[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest
             self.m_cand[i].copy_(cand)

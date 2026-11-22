@@ -44,7 +44,7 @@ image = (
 image = image.pip_install(f"triton=={os.environ.get('INKLING_TRITON', '3.6.0')}")
 image = (
     image.env({"TRITON_CACHE_DIR": "/cache/triton", "PYTHONUNBUFFERED": "1"})
-    .add_local_python_source("inkling_engine")
+    .add_local_python_source("inkling_engine", ignore=["**/__pycache__", "**/*.pyc"])  # also data/ files
     .add_local_dir("tests", "/root/tests")
 )
 

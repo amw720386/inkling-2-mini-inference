@@ -9,7 +9,7 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 167.2 tok/s | 300.5 tok/s | 158.5 tok/s | 292.2 tok/s |
+| bf16 | 165.2 tok/s | 321.2 tok/s | 155.3 tok/s | 307.7 tok/s |
 | `dense_fp8` | 204.6 tok/s | 342.4 tok/s | 189.0 tok/s | 310.6 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
@@ -38,6 +38,15 @@ One host sync per DSpark round (tried, `tests/gpu/bench_gap.py`): accepting, com
 on the device (masked drafter commit, device-indexed conv-state commit) cut GPU idle per round from 1.07 to 0.82 ms
 (profiler-inflated figures, PDL off) but added about as much GPU work; throughput unchanged within noise, so the
 two-sync round stays.
+
+Drafter shortlist: the base logits that pick the drafter's 1024 candidates per row are scored over 32,768 frequent
+tokens plus the special tokens (32,827 rows) instead of all 200,058 (ranking: `inkling_engine/data/draft_shortlist.bin`,
+token frequency over 15 MB of Python / C sources and 16 MB of English text from WikiText-2 and GSM8K train,
+`tests/gpu/build_shortlist.py`; the idea is ingine's). Draft graph 0.97 -> 0.63 ms, FP8 head copy 0.46 -> 0.08 GB.
+Acceptance changed little (up on 4 of 6 prompts); DSpark 294 -> 321 tok/s, 8k-prompt DSpark 287 -> 308, temperature 1
+218 -> 239; 2 / 4 concurrent requests 372 / 399 tok/s. Shortlist size (`INKLING_DRAFT_SHORTLIST`, DSpark greedy / 8k /
+temperature 1): 16k 318 / 293 / 211, 32k 321-324 / 306-308 / 236-239, 64k 315-319 / 307-308 / 239-247 tok/s; 32k
+stays the default (64k's edge at temperature 1 is within run-to-run noise).
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
