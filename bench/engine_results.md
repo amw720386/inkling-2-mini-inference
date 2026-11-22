@@ -111,6 +111,10 @@ across waves.
 
 ## Prefill
 
+Chunk size (`bench_prefill.py 8192 <chunk> sweep`, one machine): 2048 -> 4096 tokens per chunk: bf16 499 -> 474 ms,
+`dense_fp8` 469 -> 449, `fp4_prefill` 404 -> 381, both 374 -> 357 ms. `--prefill-chunk 4096` is an option; the
+default stays 2048 because a chunk blocks the other slots' decode steps for its duration.
+
 Short prompts (`tests/gpu/bench_ttft.py`): eager prefill launches ~800 kernels, so a prompt of up to ~48 tokens took
 ~21 ms regardless of length (launch-bound). Chunks of up to 32 tokens now replay a captured graph (one per size,
 slot- and position-independent, sharing one workspace): 8 tokens 20.9 -> 10.9 ms, 24 tokens 21.3 -> 15.6 ms, 32

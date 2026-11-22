@@ -1,6 +1,7 @@
 """Memory of the server's default configuration under the 32 GiB cap (Modal: parity --args "memcheck.py")."""
 
 import gc
+import os
 import sys
 
 import torch
@@ -13,7 +14,7 @@ torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
 G = 2**30
 for kw in (dict(max_ctx=32768, slots=4, vision=True), dict(max_ctx=262144, slots=1, kv_fp8=True, vision=True)):
     torch.cuda.reset_peak_memory_stats()
-    eng = Engine(sys.argv[1], spec=True, **kw)
+    eng = Engine(sys.argv[1], spec=True, prefill_chunk=int(os.environ.get("PREFILL_CHUNK", "2048")), **kw)
     a, pk = torch.cuda.memory_allocated() / G, torch.cuda.max_memory_allocated() / G
     n = min(kw["max_ctx"] - 64, 30000)
     eng.prefill(list(range(1000, 1000 + n)))

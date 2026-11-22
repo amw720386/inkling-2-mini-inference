@@ -91,7 +91,8 @@ model's default, as SGLang does); `--default-temperature 0` makes greedy the def
 
 Options: `--dense-fp8` (FP8 attention projections and LM head, faster, not bit-faithful), `--fp4-prefill` (NVFP4
 activations on the FP4 tensor cores for prefill expert GEMMs, Triton >= 3.6), `--kv-fp8` (FP8 cache for
-the full-attention layers), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and
+the full-attention layers), `--prefill-chunk N` (default 2048; 4096 makes prefill ~5% faster, but a chunk then pauses
+other requests' decoding for twice as long), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and
 autotunes the Triton kernels (a few minutes); results are cached in Triton's cache directory.
 
 Profiles (numbers from the RTX PRO 6000 proxy, batch 1):
