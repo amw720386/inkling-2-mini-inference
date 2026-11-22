@@ -113,6 +113,7 @@ class Engine:
         kv_dtype = torch.float8_e4m3fn if kv_fp8 else torch.bfloat16
         self.cache = InklingCache(self.cfg, CacheSpec(slots=slots, max_ctx=max_ctx + 16, ring=ring, kv_dtype=kv_dtype))
         self.model = FusedModel(self.cfg, self.w, dense_fp8=dense_fp8)
+        self.model.compact()
         self.prefill_chunk = prefill_chunk
         self.pws = self.model.workspace(prefill_chunk, 1)
         self.max_ctx = max_ctx

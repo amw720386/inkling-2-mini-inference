@@ -9,14 +9,14 @@ torch 2.9.1+cu128, Triton 3.5.1).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 153.3 tok/s | 255.6 tok/s | 145.5 tok/s | 240.9 tok/s |
-| `dense_fp8` | 172.9 tok/s | 251.7 tok/s | 164.1 tok/s | 239.0 tok/s |
+| bf16 | 160.8 tok/s | 264.4 tok/s | 149.3 tok/s | 224-241 tok/s |
+| `dense_fp8` | 188.5 tok/s | 281.0 tok/s | 173.8 tok/s | 272.5 tok/s |
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
 
-Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded): plain 149.7 tok/s, DSpark with
-speculative rejection sampling 195.1 tok/s (acceptance length 2.17).
+Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded): plain 159.3 tok/s, DSpark with
+speculative rejection sampling 214.9 tok/s (acceptance length 2.39).
 
 Scheduler (`tests/gpu/bench_concurrency.py`, 4 slots, 16k context, DSpark on): 4 concurrent greedy requests of up to 256
 tokens, ~300 tok/s aggregate including prefill (SGLang Balanced c4: 269); 2 concurrent: 230 tok/s. Each slot has its own
@@ -43,6 +43,10 @@ output equals the bf16 cache's for all 64 tokens checked.
 | decode at 131k context, plain / DSpark | 112 / 123 tok/s |
 
 SGLang's RTX 5090 recipe caps the context at 65,536 (Balanced) and 31,737 (DSpark) tokens under 32 GiB.
+
+Bandwidth context: this RTX PRO 6000 reads at ~1.53 TB/s (`tests/gpu/bench_readbw.py`); the decode GEMVs run at
+~1.30-1.34 TB/s (87%). A bf16 decode step moves ~5.1 GB (attention projections, experts, LM head), a 3.4 ms floor
+against 6.2 ms measured; the rest is the serial chain of small per-token kernels.
 
 ## Prefill
 

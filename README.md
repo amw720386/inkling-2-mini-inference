@@ -25,8 +25,8 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 
 | | plain decode | DSpark decode | 8k-prompt decode (plain / DSpark) | prefill (8k) |
 |---|---:|---:|---:|---:|
-| this engine, bf16 | 153 tok/s | 254 tok/s | 144 / 224-241 tok/s | ~19k tok/s |
-| this engine, `dense_fp8` | 173 tok/s | 252 tok/s | 164 / 239 tok/s | ~19k tok/s |
+| this engine, bf16 | 161 tok/s | 264 tok/s | 149 / 224-241 tok/s | ~19k tok/s |
+| this engine, `dense_fp8` | 189 tok/s | 281 tok/s | 174 / 273 tok/s | ~19k tok/s |
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
 
 \* SGLang's DSpark numbers come from its own benchmark prompts (its 8k figure is a document-summary prompt with high

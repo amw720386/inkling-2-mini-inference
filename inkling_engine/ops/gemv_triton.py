@@ -106,4 +106,48 @@ def fp8_gemv(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
     return out
 
 
-_pdl_enable(_dense_gemv_kernel, _fp8_gemv_kernel)
+
+@triton.autotune(cache_results=True, configs=[c for c in _CONFIGS if c.kwargs["BN"] <= 64], key=["N", "K", "MP", "FP8"])
+@triton.jit
+def _seg_gemv_kernel(X, x_stride_in, x_stride_m, W, Sc, Y, M, N, K, SW, SY, B1, B2, B3, B4,
+                     BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, FP8: tl.constexpr,
+                     PDL: tl.constexpr = PDL_ON):
+    """Y[:, n] = X[seg(n)] @ W[n] for column segments [0,B1) -> input 0, [B1,B2) -> 1, [B2,B3) -> 2,
+    [B3,B4) -> 1, [B4,N) -> 2 (boundaries are multiples of BN). X: [3, M, K] (input stride may be 0)."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    pid = tl.program_id(0)
+    c0 = pid * BN
+    inp = tl.where(c0 < B1, 0, tl.where(c0 < B2, 1, tl.where(c0 < B3, 2, tl.where(c0 < B4, 1, 2))))
+    xb = X + inp.to(tl.int64) * x_stride_in
+    cols = c0 + tl.arange(0, BN)
+    rows = tl.arange(0, MP)
+    acc = tl.zeros((MP, BN), tl.float32)
+    for k0 in tl.range(0, K, BK):
+        ks = k0 + tl.arange(0, BK)
+        w = tl.load(W + cols[None, :].to(tl.int64) * SW + ks[:, None], mask=(cols[None, :] < N) & (ks[:, None] < K),
+                    other=0.0, eviction_policy="evict_first")
+        x = tl.load(xb + rows[:, None] * x_stride_m + ks[None, :], mask=(rows[:, None] < M) & (ks[None, :] < K), other=0.0)
+        acc = tl.dot(x, w.to(tl.bfloat16), acc)
+    if FP8:
+        acc = acc * tl.load(Sc + cols, mask=cols < N, other=0.0)[None, :]
+    tl.store(Y + rows[:, None] * SY + cols[None, :], acc.to(Y.dtype.element_ty),
+             mask=(rows[:, None] < M) & (cols[None, :] < N))
+
+
+def seg_gemv(x3: torch.Tensor, w, out: torch.Tensor, bounds: tuple[int, int, int, int]) -> torch.Tensor:
+    """Multi-input projection in one launch. x3 [3, M, K] (or an expanded view with input stride 0);
+    w bf16 [N, K] or Fp8Weight; out [M, N]; bounds (B1..B4) multiples of 64."""
+    _, m, k = x3.shape
+    fp8 = isinstance(w, Fp8Weight)
+    wt, sc = (w.w8, w.scale) if fp8 else (w, out)
+    n = wt.shape[0]
+    assert m <= MAX_M and x3.stride(2) == 1 and out.stride(1) == 1 and all(b % 64 == 0 for b in bounds)
+    _seg_gemv_kernel[lambda meta: (triton.cdiv(n, meta["BN"]),)](
+        x3, x3.stride(0), x3.stride(1), wt, sc, out, m, n, k, wt.stride(0), out.stride(0), *bounds,
+        MP=16 if m <= 16 else 32, FP8=fp8,
+    )
+    return out
+
+
+_pdl_enable(_seg_gemv_kernel, _dense_gemv_kernel, _fp8_gemv_kernel)

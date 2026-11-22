@@ -390,7 +390,7 @@ def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale, w_f32=None):
     if cnt is None or cnt.numel() < logits_buf.shape[0]:
         cnt = torch.zeros(logits_buf.shape[0], dtype=torch.int32, device=x.device)
         _ROUTER_COUNTERS[key] = cnt
-    be = 2
+    be = 1
     _router_topk_kernel[(t, e // be)](x, x.stride(0), w_bf16, bias, logits_buf, cnt, ids, wts, scale,
                                       H=h, BH=triton.next_power_of_2(h), E=e, BE=be, TOPK=top_k, num_warps=4)
 
@@ -420,7 +420,7 @@ def _post_mlp_kernel(
     if PDL:
         tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
-    h = tl.arange(0, BH)
+    h = tl.program_id(1) * BH + tl.arange(0, BH)  # every channel is independent: split over programs
     hm = h < H
     sq = tl.load(TokSeq + t)
     slot = tl.load(SeqSlot + sq).to(tl.int64)
@@ -449,11 +449,12 @@ def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, deco
     bh = triton.next_power_of_2(h)
     if not decode_state and rows is not None:
         _moe_sum_kernel[(t,)](rows, m_buf, H=h, TOPK=cfg.top_k, BH=bh, num_warps=8)
-    _post_mlp_kernel[(t,)](
+    bc = 256
+    _post_mlp_kernel[(t, triton.cdiv(h, bc))](
         m_buf, m_buf.stride(0), rows if rows is not None else m_buf, conv_w, state, state.stride(0), state.stride(1), resid, dst, dst.stride(0),
         tok_seq, meta.seq_slot, meta.seq_off, cfg.conv_out_scale,
-        FROM_ROWS=decode_state, TOPK=cfg.top_k, DECODE_STATE=decode_state, H=h, BH=bh, K=cfg.sconv_kernel,
-        num_warps=8,
+        FROM_ROWS=decode_state, TOPK=cfg.top_k, DECODE_STATE=decode_state, H=h, BH=bc, K=cfg.sconv_kernel,
+        num_warps=4,
     )
 
 

@@ -21,7 +21,7 @@ from .ops import fused_triton as fk
 from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
 from .ops.conv_triton import _conv_state_kernel, conv_candidates
-from .ops.gemv_triton import Fp8Weight
+from .ops.gemv_triton import Fp8Weight, seg_gemv
 from .ops.gemv_triton import mm as dense_mm
 from .ops.moe_triton import GroupedScratch, moe_decode, moe_grouped_small, moe_prefill
 from .weights import ModelWeights
@@ -52,7 +52,7 @@ class Workspace:
         self.tmp = z(3, t, h, dt=f32)
         self.gbuf = z(t, 4, cfg.gate_rank, dt=f32)
         nqg = 2 * cfg.q_dim + cfg.rel_dim + cfg.num_heads
-        self.proj = z(t, nqg + 2 * cfg.kv_dim)
+        self.proj = z(t, max(nqg + 2 * cfg.kv_dim, (nqg + 63) // 64 * 64 + 2 * cfg.kv_dim + 128))
         self.qgrs = z(t, nqg)
         self.kv_lin = z(2, t, cfg.kv_dim)
         self.dyn = z(2, t, cfg.num_kv_heads * cfg.sconv_kernel)
@@ -95,8 +95,7 @@ class FusedModel:
         self.fp8 = {}
         if dense_fp8:
             for lw in weights.layers:
-                for name in ("w_all", "w_qgrs", "wk", "wv", "wo"):
-                    self.fp8[(lw.layer, name)] = Fp8Weight(getattr(lw, name))
+                self.fp8[(lw.layer, "wo")] = Fp8Weight(lw.wo)
             self.fp8["unembed"] = Fp8Weight(weights.unembed)
         self.visits = cfg.visits
         self.extras = []
@@ -107,6 +106,27 @@ class FusedModel:
                 qn = torch.stack([lw.q_norm, lw.k_norm, lw.v_norm])
             self.extras.append(LayerExtras(qn, lw.router_w.to(torch.bfloat16).contiguous()))
         self.nqg = 2 * cfg.q_dim + cfg.rel_dim + cfg.num_heads
+        # decode-time projection: one weight per layer, segments padded to 64 rows:
+        # [q|gate|rel|sink (+pad)] <- xq, [k] <- xk, [v] <- xv, [dyn k (+pad)] <- xk, [dyn v (+pad)] <- xv
+        pad = lambda n: (n + 63) // 64 * 64  # noqa: E731
+        nk = cfg.num_kv_heads * cfg.sconv_kernel
+        self.seg_k = pad(self.nqg)
+        self.seg_v = self.seg_k + cfg.kv_dim
+        self.seg_dk = self.seg_v + cfg.kv_dim
+        self.seg_dv = self.seg_dk + pad(nk)
+        self.seg_end = self.seg_dv + pad(nk)
+        self.w_proj = []
+        for lw in weights.layers:
+            h = cfg.hidden_size
+            wp = torch.zeros(self.seg_dk if lw.is_local else self.seg_end, h, dtype=torch.bfloat16, device="cuda")
+            wp[:self.nqg] = lw.w_qgrs
+            wp[self.seg_k:self.seg_v] = lw.wk
+            wp[self.seg_v:self.seg_dk] = lw.wv
+            if not lw.is_local:
+                wp[self.seg_dk:self.seg_dk + nk] = lw.kv_dyn_proj[:nk]
+                wp[self.seg_dv:self.seg_dv + nk] = lw.kv_dyn_proj[nk:]
+            self.w_proj.append(wp)
+        self.w_proj_dec = [Fp8Weight(wp) for wp in self.w_proj] if dense_fp8 else self.w_proj
         self.sms = torch.cuda.get_device_properties(0).multi_processor_count
         self.capture_visits: list[int] = []
         self.captures: dict[int, torch.Tensor] = {}
@@ -123,6 +143,13 @@ class FusedModel:
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)
         return build_step_meta(batch, nl, ng)
+
+    def compact(self):
+        """Drop the per-matrix attention projection copies the fast forward no longer reads (the padded
+        per-layer weight replaces them). The reference model cannot use these weights afterwards."""
+        for lw in self.w.layers:
+            lw.w_all = lw.w_qgrs = lw.wk = lw.wv = lw.kv_dyn_proj = None
+        torch.cuda.empty_cache()
 
     def _w(self, layer: int, name: str, T: int):
         """The projection weight for a T-token step (FP8 copy for decode-sized steps when enabled)."""
@@ -193,23 +220,28 @@ class FusedModel:
                 fk.depth_attn(blk, nb + 1, w.attn_queries[layer], xn[:nq], norm_w=ex.qkv_norm[:nq])
                 shared = local
 
-            # ---- projections
-            if shared:
-                proj = ws.proj[:T]
-                dense_mm(xn[0], self._w(layer, 'w_all', T), proj)
-                qp, k_lin, v_lin = proj, proj[:, self.nqg:self.nqg + c.kv_dim], proj[:, self.nqg + c.kv_dim:]
-            else:
-                qp = ws.qgrs[:T]
-                dense_mm(xn[0], self._w(layer, 'w_qgrs', T), qp)
-                dense_mm(xn[1], self._w(layer, 'wk', T), ws.kv_lin[0, :T])
-                dense_mm(xn[2], self._w(layer, 'wv', T), ws.kv_lin[1, :T])
-                k_lin, v_lin = ws.kv_lin[0, :T], ws.kv_lin[1, :T]
+            # ---- projections (one padded weight per layer; see __init__)
+            ncols = self.seg_dk if local else self.seg_end
+            if T <= 32:  # decode / verify: one multi-input launch per visit
+                proj = ws.proj[:T, :ncols]
+                x3 = xn[:1].expand(3, -1, -1) if shared else xn
+                seg_gemv(x3, self.w_proj_dec[layer], proj, (self.seg_k, self.seg_v, self.seg_dk, self.seg_dv))
+            else:  # prefill: cuBLAS on the segments
+                wb = self.w_proj[layer]
+                if shared:
+                    proj = xn[0] @ wb.t()
+                else:
+                    parts = [xn[0] @ wb[:self.seg_k].t(), xn[1] @ wb[self.seg_k:self.seg_v].t(),
+                             xn[2] @ wb[self.seg_v:self.seg_dk].t()]
+                    if not local:
+                        parts += [xn[1] @ wb[self.seg_dk:self.seg_dv].t(), xn[2] @ wb[self.seg_dv:].t()]
+                    proj = torch.cat(parts, 1)
+            qp = proj
+            k_lin, v_lin = proj[:, self.seg_k:self.seg_v], proj[:, self.seg_v:self.seg_dk]
             dyn = None
             if not local:
-                nk = c.num_kv_heads * c.sconv_kernel
-                dense_mm(xn[1] if not shared else xn[0], lw.kv_dyn_proj[:nk], ws.dyn[0, :T])
-                dense_mm(xn[2] if not shared else xn[0], lw.kv_dyn_proj[nk:], ws.dyn[1, :T])
-                dyn = (ws.dyn[0, :T], ws.dyn[1, :T])
+                nkk = c.num_kv_heads * c.sconv_kernel
+                dyn = (proj[:, self.seg_dk:self.seg_dk + nkk], proj[:, self.seg_dv:self.seg_dv + nkk])
 
             if local:
                 kc, vc, am, ring = cache.local_k[v.local_index], cache.local_v[v.local_index], meta.local, cache.spec.ring
