@@ -11,8 +11,8 @@ path is a small set of fused Triton kernels captured in CUDA graphs, with DSpark
 |---|---|
 | Correctness | state handling (KV cache, sliding ring, conv states, loop passes) bit-exact in an fp64 check; logits within bf16 noise of transformers; greedy speculative output equal to plain greedy when verify and decode run the same kernels |
 | Decode | fused per-token kernels, one CUDA graph per step; NVFP4 experts decoded with the hardware `cvt.e2m1x2`; grouped expert GEMMs for multi-token steps |
-| Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences; greedy (longest matching prefix) and sampled requests (speculative rejection sampling, exact for the target distribution: 195 vs 150 tok/s at temperature 1) |
-| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests: ~300 tok/s aggregate at 4 concurrent; speculation for a lone request in any slot and, when it pays, for batched steps (slot-independent verify graphs; adaptive choice from calibrated costs) |
+| Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences; greedy (longest matching prefix) and sampled requests (speculative rejection sampling, exact for the target distribution: 220 vs 160 tok/s at temperature 1) |
+| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests with interleaved chunked prefill; speculation for a lone request in any slot and, when it pays, for batched steps (one drafter pass for all slots, slot-independent verify graphs, adaptive choice from calibrated costs) |
 | Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head (faster, not bit-faithful to the bf16 checkpoint) |
 | Images | transformers' vision tower + processor; features spliced at the image placeholders. Greedy output on an image prompt equals transformers' for 40/40 tokens (`tests/gpu/vision_check.py`) |
 | Long context | `kv_fp8`: E4M3 cache for the full-attention layers; 256k context fits in 32 GiB (25.3 GiB after start-up), 123 tok/s DSpark decode at 131k |
@@ -30,9 +30,13 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
 
 \* SGLang's DSpark numbers come from its own benchmark prompts (its 8k figure is a document-summary prompt with high
-acceptance), so they are not the same prompts as the rows above. Four concurrent streams: 405 tok/s aggregate
-(SGLang Balanced: 269). Memory after start-up with DSpark and a 32k context: ~23 GiB, leaving room for long
-contexts that SGLang's 32 GB recipe cannot hold (see `bench/baseline_sglang.md`).
+acceptance), so they are not the same prompts as the rows above.
+
+Concurrent requests through the scheduler (`tests/gpu/bench_batched_spec.py`): 2 requests 248 tok/s, 4 requests
+321 tok/s aggregate (SGLang Balanced at concurrency 4: 269). Temperature 1 (the model's default), single stream:
+220 tok/s with DSpark. The default server profile (4 slots x 32k context, DSpark, vision) holds 26.3 GiB after
+start-up; a 256k-context profile fits too, which SGLang's 32 GB recipe cannot (see `bench/baseline_sglang.md`).
+Full numbers: `bench/engine_results.md`.
 
 Prefill caveat: the expert GEMMs dequantize to bf16 and run on bf16 tensor cores with fp32 accumulation, which the
 RTX PRO 6000 runs at full rate and GeForce cards (RTX 5090) at roughly half rate, so prefill on a real 5090 is likely
@@ -48,8 +52,11 @@ inkling_engine/
   model.py         reference forward (pure torch ops), used to test everything else
   fused_model.py   fast forward: ~12 fused launches per layer visit, CUDA-graph decode
   dspark.py        DSpark drafter
-  engine.py        prefill, decode, speculative rounds, sampling, prefix reuse
-  server.py        OpenAI-compatible HTTP server
+  engine.py        prefill, decode, speculative rounds (single and batched), prefix reuse
+  scheduler.py     continuous batching over the slots, interleaved prefill, cancellation
+  sampling.py      temperature / top-k / top-p and speculative rejection sampling
+  vision.py        image input (vision tower + processor)
+  server.py        OpenAI-compatible HTTP server (streaming, tools, images, reasoning split)
   ops/             Triton kernels: attention, MoE (GEMV / grouped), GEMV (bf16 / FP8), convs, fused glue
 tests/             CPU unit tests; tests/gpu/ runs on Modal (parity, kernels, benchmarks, GSM8K, server)
 modal/             Modal entry points (weights volume, SGLang baseline, engine tests)
@@ -64,7 +71,12 @@ pip install torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu1
 pip install safetensors tokenizers transformers fastapi uvicorn pillow
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark, 4 slots x 32k
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144 --slots 1 --no-vision
+curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json'   -d '{"messages": [{"role": "user", "content": "Hello!"}], "reasoning_effort": "low"}'
 ```
+
+Options: `--dense-fp8` (FP8 attention projections and LM head, faster, not bit-faithful), `--kv-fp8` (FP8 cache for
+the full-attention layers), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and
+autotunes the Triton kernels (a few minutes); results are cached in Triton's cache directory.
 
 GPU tests and benchmarks (Modal, `RTX-PRO-6000`):
 

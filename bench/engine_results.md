@@ -48,6 +48,10 @@ Bandwidth context: this RTX PRO 6000 reads at ~1.53 TB/s (`tests/gpu/bench_readb
 ~1.30-1.34 TB/s (87%). A bf16 decode step moves ~5.1 GB (attention projections, experts, LM head), a 3.4 ms floor
 against 6.2 ms measured; the rest is the serial chain of small per-token kernels.
 
+Tried and dropped: an exact screened LM head for greedy steps (FP8 scores, error bound ||x||*||w - w8||, exact
+recompute of the top-64 rows). On 1,951 real hidden states the rigorous bound certified only 19% of rows, so it
+would fall back to the full head most of the time (experiment in git history, commit 0c0e4d5^).
+
 ## Memory and robustness
 
 `tests/gpu/memcheck.py` (32 GiB cap): the default server profile (4 slots x 32k context, DSpark, vision) holds
