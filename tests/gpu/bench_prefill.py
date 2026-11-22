@@ -1,4 +1,7 @@
-"""Prefill throughput and kernel breakdown (Modal: parity --args "bench_prefill.py [tokens] [chunk]")."""
+"""Prefill throughput and kernel breakdown (Modal: parity --args "bench_prefill.py [tokens] [chunk] [ops|sweep]").
+
+sweep: bf16 / dense_fp8 / fp4_prefill / both on one model and machine (median of 3 timed runs each), no profile.
+"""
 
 import os
 import sys
@@ -32,6 +35,22 @@ def run():
         part = ids[s:s + chunk]
         model.forward(Batch.build([SeqChunk(0, s, len(part), "last")], [part]), cache, ws)
 
+
+if len(sys.argv) > 4 and sys.argv[4] == "sweep":
+    model = FusedModel(cfg, w, dense_fp8=True)  # keeps the bf16 weights too (no compact): modes toggle per run
+    for fp8, fp4 in ((False, False), (True, False), (False, True), (True, True)):
+        model.dense_fp8, model.fp4_prefill = fp8, fp4
+        run()
+        times = []
+        for _ in range(3):
+            torch.cuda.synchronize()
+            t0 = time.time()
+            run()
+            torch.cuda.synchronize()
+            times.append(time.time() - t0)
+        dt = sorted(times)[1]
+        print(f"dense_fp8={fp8!s:5} fp4_prefill={fp4!s:5}: {dt * 1000:.0f} ms -> {n / dt:.0f} tok/s")
+    sys.exit(0)
 
 run()
 torch.cuda.synchronize()

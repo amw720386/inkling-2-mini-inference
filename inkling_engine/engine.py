@@ -356,7 +356,7 @@ class Engine:
                    slot: int = 0) -> tuple[list[int], int]:
         """One DSpark round for the sequence in `slot` whose anchor (sampled, not yet processed) is at P.
         Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
-        drafts, conf = self.drafter.draft(anchor, P, max(sp.temperature, 0.0), slot=slot)
+        drafts, conf = self.drafter.draft(anchor, P, self._draft_temp(sp), slot=slot)
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
         seeded = sp.seed is not None
@@ -390,9 +390,9 @@ class Engine:
         d = self.drafter
         drafts = []
         multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs],
-                              [max(r.sp.temperature, 0.0) for r in reqs], [r.slot for r in reqs])
+                              [self._draft_temp(r.sp) for r in reqs], [r.slot for r in reqs])
         for r, (tok, conf, cand, lg_c) in zip(reqs, multi):
-            q = torch.softmax(lg_c / r.sp.temperature, -1) if r.sp.temperature > 0 else None
+            q = torch.softmax(lg_c / self._draft_temp(r.sp), -1) if r.sp.temperature > 0 else None
             drafts.append((tok, conf, cand if q is not None else None, q))
         info = torch.cat([torch.cat([c, t.float()]) for t, c, _, _ in drafts]).tolist()  # one sync
         k = len(reqs)
@@ -434,8 +434,15 @@ class Engine:
             out.append((drafted[i][:a] + [nxt], commit))
         return out
 
+    # sampled requests draft at temperature * scale; acceptance stays exact for any scale > 0. 0.8 measured best
+    # at temperature 1 (tests/gpu/bench_draft_temp.py: +2-4% tok/s over 1.0; 0.7 and below lose)
+    draft_temp_scale = 0.8
+
+    def _draft_temp(self, sp: Sampling) -> float:
+        return sp.temperature * self.draft_temp_scale if sp.temperature > 0 else 0.0
+
     def _accept_sampled(self, drafts, target_logits, sp, gen):
-        cand, q = self.drafter.draft_distribution(drafts.shape[0], sp.temperature)
+        cand, q = self.drafter.draft_distribution(drafts.shape[0], self._draft_temp(sp))
         return accept_sampled(drafts, target_logits, cand, q, sp, gen)
 
     def generate(self, ids: list[int], max_new: int, stop_ids=(), spec: bool | None = None,

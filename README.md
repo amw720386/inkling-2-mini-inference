@@ -94,6 +94,21 @@ activations on the FP4 tensor cores for prefill expert GEMMs, Triton >= 3.6), `-
 the full-attention layers), `--no-spec`, `--slots N`, `--max-ctx N`, `--no-vision`. The first start compiles and
 autotunes the Triton kernels (a few minutes); results are cached in Triton's cache directory.
 
+Profiles (numbers from the RTX PRO 6000 proxy, batch 1):
+
+| goal | flags | decode (plain / DSpark) | 8k prefill* | fidelity |
+|---|---|---:|---:|---|
+| checkpoint math | (none) | 160 / 285 tok/s | 533 ms | bf16 dense layers, as transformers / SGLang |
+| speed | `--dense-fp8` | 191 / 311 tok/s | 506 ms | FP8 attention projections and LM head (GSM8K unchanged) |
+| long prompts on GeForce | `--dense-fp8 --fp4-prefill` | 189 / 297 tok/s | 368 ms | adds NVFP4 activations for prefill experts (DSpark acceptance a little lower) |
+| long context | `--kv-fp8 --max-ctx 262144 --slots 1` | | | FP8 cache for the full-attention layers |
+
+\* 8192 random tokens, 2048-token chunks, all four modes on one machine (`bench_prefill.py 8192 2048 sweep`;
+`--fp4-prefill` alone: 395 ms). Natural-text prompts route to fewer experts and run faster (23-28k tok/s).
+
+On a GeForce card (RTX 5090) the bf16 prefill GEMMs run at half the PRO card's rate, so `--dense-fp8` and
+`--fp4-prefill` should matter more for prefill there than these proxy numbers show.
+
 GPU tests and benchmarks (Modal, `RTX-PRO-6000`):
 
 ```bash

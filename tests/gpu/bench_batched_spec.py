@@ -1,4 +1,7 @@
-"""Steady-state throughput of k concurrent requests: batched plain, always-batched speculation, adaptive."""
+"""Steady-state throughput of k concurrent requests: batched plain, always-batched speculation, adaptive.
+
+Modal: parity --args "bench_batched_spec.py [temperature]" (default greedy; seeded when sampling).
+"""
 
 import json
 import sys
@@ -9,9 +12,11 @@ import torch
 
 sys.path.insert(0, "/root")
 from inkling_engine.engine import Engine  # noqa: E402
+from inkling_engine.sampling import Sampling  # noqa: E402
 from inkling_engine.scheduler import Scheduler  # noqa: E402
 
 path = sys.argv[1]
+temp = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
 total = torch.cuda.get_device_properties(0).total_memory
 torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
 eng = Engine(path, max_ctx=8192, spec=True, slots=4)
@@ -43,7 +48,8 @@ for k in (2, 4):
         eng.verify_costs = eng.verify_costs_saved if batched == "adaptive" else {}
         sched.counters = {kk: ([0, 0.0] if kk != "batch_sizes" else {}) for kk in sched.counters}
         res = {}
-        th = [threading.Thread(target=lambda i=i: res.__setitem__(i, sched.generate(items[i]["input_ids"], N, {eng.cfg.eos_token_id})))
+        th = [threading.Thread(target=lambda i=i: res.__setitem__(i, sched.generate(items[i]["input_ids"], N, {eng.cfg.eos_token_id},
+                                                                          Sampling(temperature=temp, seed=i if temp > 0 else None))))
               for i in range(k)]
         t0 = time.time()
         for x in th:

@@ -20,6 +20,11 @@ DSpark 237.6 tok/s, 8k prefill 24.8k tok/s.)
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
 
+Draft temperature for sampled requests (`tests/gpu/bench_draft_temp.py`, 6 prompts x 4 seeds, temperature 1):
+rejection sampling is exact for any draft distribution, so the drafter may sample sharper than the target. Scale
+1.0 / 0.9 / 0.8 / 0.7: 211 / 213 / 215 / 205 tok/s (accept length 2.25 / 2.25 / 2.29 / 2.17); a second run gave
+212 vs 220 for 1.0 vs 0.8. The engine drafts at 0.8 x the request temperature.
+
 Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded): plain 159.3 tok/s, DSpark with
 speculative rejection sampling 219.7 tok/s (acceptance length 2.34).
 
@@ -32,6 +37,10 @@ concurrent requests, plain batched 210 tok/s, batched DSpark 248, adaptive 244; 
 DSpark 320, adaptive 321. The drafts of all active requests run as one pass (shared GEMVs; 4 drafts 6.4 -> 3.1
 ms), with graphs for every slot set captured at start-up. The scheduler speculates in a batched step only when the
 calibrated costs and each request's recent acceptance predict more tokens/ms than a plain batched step.
+
+Decode MoE as one persistent launch (`tests/gpu/bench_moe_fused.py`: w13 + SwiGLU, a sense-reversing grid barrier,
+then w2, one program per SM): correct, but 104-230 us against 28.7 us for the two-launch path (1250 GB/s, ~85% of the
+copy bandwidth); one resident program per SM keeps too few loads in flight. Dropped.
 
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
 
