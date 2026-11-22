@@ -18,33 +18,59 @@ import uuid
 
 THINK = "<|content_thinking|>"
 TEXT = "<|content_text|>"
-MARKERS = ("<|message_model|>", "<|end_message|>", "<|content_model_end_sampling|>")
+TOOL_JSON = "<|content_invoke_tool_json|>"
+HEADER = "<|message_model|>"
+END = "<|end_message|>"
+DROP = ("<|content_model_end_sampling|>",)
 
 
 class Splitter:
-    """Incrementally splits decoded model text into (reasoning, content) deltas."""
+    """Incrementally splits decoded model text into reasoning, content and tool calls.
+
+    A model message is `<|message_model|>[NAME]<|content_X|>body<|end_message|>`; X = thinking -> reasoning,
+    text -> content, invoke_tool_json -> a tool call whose body is {"name": ..., "args": {...}}.
+    feed() returns (reasoning delta, content delta, [completed tool calls as (name, args dict)]).
+    """
 
     def __init__(self):
         self.buf = ""
-        self.mode = "content"
+        self.mode = "content"  # content | reasoning | header | tool
+        self.header = ""
+        self.tool = ""
 
-    def feed(self, text: str, final: bool = False) -> tuple[str, str]:
+    def feed(self, text: str, final: bool = False):
         self.buf += text
-        r, c = [], []
+        r, c, calls = [], [], []
         while self.buf:
+            if self.buf.startswith(HEADER):
+                self.mode, self.header, self.buf = "header", "", self.buf[len(HEADER):]
+                continue
             if self.buf.startswith(THINK):
                 self.mode, self.buf = "reasoning", self.buf[len(THINK):]
                 continue
             if self.buf.startswith(TEXT):
                 self.mode, self.buf = "content", self.buf[len(TEXT):]
                 continue
-            hit = next((m for m in MARKERS if self.buf.startswith(m)), None)
+            if self.buf.startswith(TOOL_JSON):
+                self.mode, self.tool, self.buf = "tool", "", self.buf[len(TOOL_JSON):]
+                continue
+            if self.buf.startswith(END):
+                if self.mode == "tool":
+                    calls.append(self._tool_call())
+                self.mode, self.buf = "content", self.buf[len(END):]
+                continue
+            hit = next((m for m in DROP if self.buf.startswith(m)), None)
             if hit:
                 self.buf = self.buf[len(hit):]
                 continue
             i = self.buf.find("<|")
             if i == -1:
-                chunk, self.buf = self.buf, ""
+                if self.buf.endswith("<") and not final:  # maybe the start of a special token
+                    if len(self.buf) == 1:
+                        break
+                    chunk, self.buf = self.buf[:-1], "<"
+                else:
+                    chunk, self.buf = self.buf, ""
             elif i > 0:
                 chunk, self.buf = self.buf[:i], self.buf[i:]
             else:
@@ -54,8 +80,54 @@ class Splitter:
                 end = len(self.buf) if j == -1 else j + 2
                 self.buf = self.buf[end:]  # drop unknown special tokens
                 continue
-            (r if self.mode == "reasoning" else c).append(chunk)
-        return "".join(r), "".join(c)
+            if self.mode == "header":
+                self.header += chunk
+            elif self.mode == "tool":
+                self.tool += chunk
+            else:
+                (r if self.mode == "reasoning" else c).append(chunk)
+        if final and self.mode == "tool" and self.tool:
+            calls.append(self._tool_call())
+            self.mode = "content"
+        return "".join(r), "".join(c), calls
+
+    def _tool_call(self):
+        try:
+            obj = json.loads(self.tool)
+            name, args = obj.get("name", self.header.strip()), obj.get("args", {})
+        except (json.JSONDecodeError, AttributeError):
+            name, args = self.header.strip(), {"_raw": self.tool}
+        self.tool = ""
+        return name, args
+
+
+def normalize_messages(messages: list[dict]) -> list[dict]:
+    """OpenAI clients send tool-call arguments as JSON strings; the template wants parsed objects."""
+    out = []
+    for m in messages:
+        m = dict(m)
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            calls = []
+            for tc in m["tool_calls"]:
+                tc = dict(tc)
+                fn = dict(tc.get("function") or {})
+                if isinstance(fn.get("arguments"), str):
+                    try:
+                        fn["arguments"] = json.loads(fn["arguments"] or "{}")
+                    except json.JSONDecodeError:
+                        fn["arguments"] = {"_raw": fn["arguments"]}
+                tc["function"] = fn
+                calls.append(tc)
+            m["tool_calls"] = calls
+            if m.get("content") is None:
+                m["content"] = ""
+        out.append(m)
+    return out
+
+
+def tool_call_obj(name, args, index):
+    return {"index": index, "id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
 
 
 class Server:
@@ -75,7 +147,7 @@ class Server:
         kwargs = dict(body.get("chat_template_kwargs") or {})
         if "reasoning_effort" in body:
             kwargs["reasoning_effort"] = body["reasoning_effort"]
-        enc = self.tok.apply_chat_template(body["messages"], tools=body.get("tools"), tokenize=True,
+        enc = self.tok.apply_chat_template(normalize_messages(body["messages"]), tools=body.get("tools"), tokenize=True,
                                            add_generation_prompt=True, return_dict=True, **kwargs)
         return [int(i) for i in enc["input_ids"]]
 
@@ -152,8 +224,8 @@ def build_app(server: Server):
                 if isinstance(item, tuple) and item and item[0] is done:
                     if req.error is not None:
                         raise req.error
-                    r, c = split.feed("", final=True)
-                    yield ("delta", r, c, None)
+                    r, c, calls = split.feed("", final=True)
+                    yield ("delta", r, c, calls)
                     yield ("end", list(out_tokens), req.stats, rid, created)
                     return
                 toks.append(item)
@@ -162,9 +234,9 @@ def build_app(server: Server):
                 if delta.endswith("�"):  # incomplete UTF-8 sequence: wait for the next token
                     prev_text = prev_text[:-1]
                     delta = delta[:-1]
-                r, c = split.feed(delta) if chat else ("", delta)
-                if r or c:
-                    yield ("delta", r, c, None)
+                r, c, calls = split.feed(delta) if chat else ("", delta, [])
+                if r or c or calls:
+                    yield ("delta", r, c, calls)
         finally:
             if not req.done.is_set():  # the client went away (generator closed): stop generating
                 req.cancel.set()
@@ -186,11 +258,13 @@ def build_app(server: Server):
         stream = bool(body.get("stream"))
         obj = "chat.completion" if chat else "text_completion"
         if stream:
+            n_calls = [0]
+
             async def sse():
                 async for ev in generate(ids, body, chat):
                     if ev[0] == "delta":
-                        _, r, c, _ = ev
-                        if not (r or c):
+                        _, r, c, calls = ev
+                        if not (r or c or calls):
                             continue
                         if chat:
                             delta = {}
@@ -198,32 +272,39 @@ def build_app(server: Server):
                                 delta["reasoning_content"] = r
                             if c:
                                 delta["content"] = c
+                            if calls:
+                                delta["tool_calls"] = [tool_call_obj(n, a, n_calls[0] + i) for i, (n, a) in enumerate(calls)]
+                                n_calls[0] += len(calls)
                             choice = {"index": 0, "delta": delta, "finish_reason": None}
                         else:
                             choice = {"index": 0, "text": c, "finish_reason": None}
                         yield f"data: {json.dumps({'object': obj + '.chunk', 'choices': [choice], 'model': server.model_id})}\n\n"
                     else:
                         _, out, st, rid, created = ev
-                        fin = server.finish_reason(out, body)
+                        fin = "tool_calls" if n_calls[0] else server.finish_reason(out, body)
                         choice = ({"index": 0, "delta": {}, "finish_reason": fin} if chat
                                   else {"index": 0, "text": "", "finish_reason": fin})
                         yield f"data: {json.dumps({'id': rid, 'object': obj + '.chunk', 'created': created, 'model': server.model_id, 'choices': [choice], 'usage': server.usage(ids, out, st)})}\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(sse(), media_type="text/event-stream")
-        reasoning, content = [], []
+        reasoning, content, calls = [], [], []
         final = None
         async for ev in generate(ids, body, chat):
             if ev[0] == "delta":
                 reasoning.append(ev[1])
                 content.append(ev[2])
+                calls += ev[3] or []
             else:
                 final = ev
         _, out, st, rid, created = final
-        fin = server.finish_reason(out, body)
+        fin = "tool_calls" if calls else server.finish_reason(out, body)
         if chat:
-            msg = {"role": "assistant", "content": "".join(content)}
+            text = "".join(content)
+            msg = {"role": "assistant", "content": text if (text or not calls) else None}
             if any(reasoning):
                 msg["reasoning_content"] = "".join(reasoning)
+            if calls:
+                msg["tool_calls"] = [tool_call_obj(n, a, i) for i, (n, a) in enumerate(calls)]
             choice = {"index": 0, "message": msg, "finish_reason": fin}
         else:
             choice = {"index": 0, "text": "".join(content), "finish_reason": fin}

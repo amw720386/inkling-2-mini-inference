@@ -86,6 +86,37 @@ r2 = requests.post(B + "/completions", json={"prompt": "Once upon a time", "max_
                                             "top_p": 0.95, "seed": 7}).json()
 print("sampled:", repr(r["choices"][0]["text"]), "| same seed reproduces:", r["choices"][0]["text"] == r2["choices"][0]["text"])
 ok &= r["choices"][0]["text"] == r2["choices"][0]["text"]
+# tool calling round trip
+tools = [{"type": "function", "function": {"name": "get_weather", "description": "Current weather for a city",
+                                           "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                                                          "required": ["city"]}}}]
+tmsgs = [{"role": "user", "content": "What's the weather in Paris right now? Use the tool."}]
+r = requests.post(B + "/chat/completions", json={"messages": tmsgs, "tools": tools, "max_tokens": 300,
+                                                 "reasoning_effort": "low"}).json()
+ch = r["choices"][0]
+calls = ch["message"].get("tool_calls") or []
+print("tool call:", ch["finish_reason"], [(c["function"]["name"], c["function"]["arguments"]) for c in calls])
+ok &= ch["finish_reason"] == "tool_calls" and calls and calls[0]["function"]["name"] == "get_weather"     and "paris" in calls[0]["function"]["arguments"].lower()
+if calls:
+    tmsgs += [ch["message"], {"role": "tool", "tool_call_id": calls[0]["id"], "content": '{"temp_c": 18, "sky": "cloudy"}'}]
+    r = requests.post(B + "/chat/completions", json={"messages": tmsgs, "tools": tools, "max_tokens": 300,
+                                                     "reasoning_effort": "low"}).json()
+    ans = r["choices"][0]["message"]["content"] or ""
+    print("after tool result:", repr(ans[:200]), "| cached:", r["usage"]["prompt_tokens_details"]["cached_tokens"])
+    ok &= "18" in ans
+# streamed tool call
+stream_calls = []
+with requests.post(B + "/chat/completions", json={"messages": tmsgs[:1], "tools": tools, "max_tokens": 300,
+                                                  "stream": True, "reasoning_effort": "low"}, stream=True) as resp:
+    fin = None
+    for line in resp.iter_lines():
+        if line.startswith(b"data: ") and line[6:] != b"[DONE]":
+            ev = json.loads(line[6:])
+            stream_calls += ev["choices"][0].get("delta", {}).get("tool_calls") or []
+            fin = ev["choices"][0].get("finish_reason") or fin
+print("streamed tool call:", fin, [c["function"]["name"] for c in stream_calls])
+ok &= fin == "tool_calls" and stream_calls and stream_calls[0]["function"]["name"] == "get_weather"
+
 # client disconnect mid-stream must stop generation and free the slot
 with requests.post(B + "/completions", json={"prompt": "Write a very long story about a dragon.", "max_tokens": 3000,
                                              "stream": True}, stream=True) as resp:
