@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 
 @triton.jit
 def _conv_out_kernel(
@@ -23,7 +25,10 @@ def _conv_out_kernel(
     T, C: tl.constexpr, K: tl.constexpr, scale,
     DYN: tl.constexpr, CH_PER_HEAD: tl.constexpr,
     BT: tl.constexpr, BC: tl.constexpr,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     pt = tl.program_id(0)
     pc = tl.program_id(1)
     t = pt * BT + tl.arange(0, BT)
@@ -62,7 +67,9 @@ def _conv_out_kernel(
 
 @triton.jit
 def _conv_state_kernel(X, x_stride, State, st_slot, st_row, SeqSlot, SeqOff, SeqN,
-                       C: tl.constexpr, K: tl.constexpr, BC: tl.constexpr):
+                       C: tl.constexpr, K: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     sq = tl.program_id(0)
     pc = tl.program_id(1)
     c = pc * BC + tl.arange(0, BC)
@@ -116,9 +123,11 @@ def short_conv(x, state, meta, tok_seq, weight=None, static=None, dyn=None, ch_p
 
 
 @triton.jit
-def _conv_cand_kernel(X, x_stride, State, st_row, Cand, cand_stride_c, cand_row, C: tl.constexpr, BC: tl.constexpr):
+def _conv_cand_kernel(X, x_stride, State, st_row, Cand, cand_stride_c, cand_row, C: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Speculative verify of one sequence: Cand[c] = the conv state after committing the first c + 1 rows
     of the chunk X (last 3 of [old state, x_0..x_c]); the old State is left untouched."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     cidx = tl.program_id(0)
     pc = tl.program_id(1)
     ch = pc * BC + tl.arange(0, BC)
@@ -137,3 +146,6 @@ def conv_candidates(x, state_slot, cand):
     m, c = x.shape
     _conv_cand_kernel[(m, triton.cdiv(c, 512))](x, x.stride(0), state_slot, state_slot.stride(0), cand,
                                                 cand.stride(0), cand.stride(1), c, BC=512, num_warps=4)
+
+
+_pdl_enable(_conv_out_kernel, _conv_state_kernel, _conv_cand_kernel)

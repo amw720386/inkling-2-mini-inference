@@ -16,6 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 
 @triton.jit
 def _tanh(x):
@@ -34,7 +36,9 @@ def _raw_rows(Wstep, Rest, Bias, step, rows, k, st, w1, R: tl.constexpr):
 
 @triton.jit
 def _cell_kernel(step, Wstep, Rest, Bias, W1, Anchor, Tokens, State, Latent,
-                 R: tl.constexpr, BI: tl.constexpr):
+                 R: tl.constexpr, BI: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
     j = pid * BI + tl.arange(0, BI)
     k = tl.arange(0, R)
@@ -58,9 +62,11 @@ def _cell_kernel(step, Wstep, Rest, Bias, W1, Anchor, Tokens, State, Latent,
 
 @triton.jit
 def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, Counter, Tokens, Conf, Temp, Seed,
-                   K: tl.constexpr, R: tl.constexpr, BC: tl.constexpr, NPROG: tl.constexpr):
+                   K: tl.constexpr, R: tl.constexpr, BC: tl.constexpr, NPROG: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Pick = argmax(logit) when Temp <= 0, else argmax(logit / T + Gumbel noise) (a sample from
     softmax(logit / T) over the candidates). Conf is the max softmax probability of the plain logits."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
     c = pid * BC + tl.arange(0, BC)
     k = tl.arange(0, R)
@@ -123,3 +129,6 @@ class MarkovHead:
                                           self.counter, tokens, conf, temp, seed, K=kk, R=r, BC=self.bc,
                                           NPROG=self.nprog,
                                           num_warps=4)
+
+
+_pdl_enable(_cell_kernel, _logits_kernel)

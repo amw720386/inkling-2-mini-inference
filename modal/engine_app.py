@@ -50,9 +50,16 @@ def run_parity(args: list[str]):
     import subprocess
     import sys
 
+    import os
+
+    env = dict(os.environ)
+    while args and "=" in args[0] and not args[0].endswith(".py"):  # KEY=VALUE environment overrides
+        k, v = args[0].split("=", 1)
+        env[k] = v
+        args = args[1:]
     script = "/root/tests/gpu/" + (args[0].split("/")[-1] if args and args[0].endswith(".py") else "parity.py")
     rest = args[1:] if args and args[0].endswith(".py") else args
-    return subprocess.call([sys.executable, script, WEIGHTS, *rest])
+    return subprocess.call([sys.executable, script, WEIGHTS, *rest], env=env)
 
 
 @app.function(**COMMON, memory=65536)

@@ -50,7 +50,7 @@ GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`)
 
 | | accuracy |
 |---|---:|
-| engine bf16 | 0.835 |
+| engine bf16 | 0.835 (0.840 re-run after prefill/scheduler/vision/PDL changes) |
 | engine `dense_fp8` | 0.825 |
 | SGLang Balanced (baseline) | 0.850 |
 | SGLang DSpark (baseline) | 0.830 |

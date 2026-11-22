@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 MAX_M = 16
 
 _CONFIGS = [
@@ -21,7 +23,9 @@ _CONFIGS = [
 
 @triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
 @triton.jit
-def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
+def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
     cols = pid * BN + tl.arange(0, BN)
     rows = tl.arange(0, MP)
@@ -60,8 +64,10 @@ def mm(x: torch.Tensor, w, out: torch.Tensor) -> torch.Tensor:
 
 @triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K"])
 @triton.jit
-def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr):
+def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Y = (X @ W8^T) * scale[col]; W8 float8_e4m3 [N, K] with one fp32 scale per row."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
     cols = pid * BN + tl.arange(0, BN)
     rows = tl.arange(0, MP)
@@ -98,3 +104,6 @@ def fp8_gemv(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
         x, w.w8, w.scale, out, m, n, k, x.stride(0), w.w8.stride(0), out.stride(0), MP=16,
     )
     return out
+
+
+_pdl_enable(_dense_gemv_kernel, _fp8_gemv_kernel)

@@ -23,6 +23,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 # persistent (graph-safe) scratch for message-norm block sums, keyed by shape
 _SS: dict = {}
 
@@ -72,7 +74,9 @@ def _depth_attn_row(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA:
 def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_t, Q, Wn,
                        Out, out_stride_q, out_stride_t, eps,
                        HAS_EXTRA: tl.constexpr, NORM: tl.constexpr, OUT_F32: tl.constexpr,
-                       H: tl.constexpr, BH: tl.constexpr):
+                       H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     qi = tl.program_id(1)
     h = tl.arange(0, BH)
@@ -161,7 +165,10 @@ def _qkv_post_kernel(
     R_COL: tl.constexpr, K: tl.constexpr,
     GLOBAL: tl.constexpr, WRITE_CACHE: tl.constexpr, RING: tl.constexpr, DECODE_STATE: tl.constexpr,
     KV_FP8: tl.constexpr = False,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     kvh = tl.program_id(1)
     part = tl.program_id(2)  # 0..GRP-1: one q/rel head of the group; GRP: the K/V convs
@@ -263,7 +270,10 @@ def _post_attn_kernel(
     TokSeq, SeqSlot, SeqOff, conv_scale, eps,
     BOUNDARY: tl.constexpr, NORM: tl.constexpr, DECODE_STATE: tl.constexpr,
     H: tl.constexpr, BH: tl.constexpr, K: tl.constexpr,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     h = tl.arange(0, BH)
     hm = h < H
@@ -306,9 +316,11 @@ def post_attn(o, conv_w, state, blk, ns, part_slot, resid, query, norm_w, out, m
 # --------------------------------------------------------------------------- router
 @triton.jit
 def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
-                        H: tl.constexpr, BH: tl.constexpr, E: tl.constexpr, BE: tl.constexpr, TOPK: tl.constexpr):
+                        H: tl.constexpr, BH: tl.constexpr, E: tl.constexpr, BE: tl.constexpr, TOPK: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Each program computes BE expert logits of one token with one load of its weight rows; the program
     that finishes last for the token (atomic counter) selects the top-k and resets the counter."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     pe = tl.program_id(1)
     h = tl.arange(0, BH)
@@ -344,7 +356,9 @@ _ROUTER_COUNTERS: dict = {}
 
 
 @triton.jit
-def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.constexpr, scale):
+def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.constexpr, scale, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     ea = tl.arange(0, E)
     sg = tl.sigmoid(tl.load(Logits + t * l_stride + ea))
@@ -383,7 +397,9 @@ def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale, w_f32=None):
 
 # ------------------------------------------------------------------------- post mlp
 @triton.jit
-def _moe_sum_kernel(Rows, M, H: tl.constexpr, TOPK: tl.constexpr, BH: tl.constexpr):
+def _moe_sum_kernel(Rows, M, H: tl.constexpr, TOPK: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     h = tl.arange(0, BH)
     hm = h < H
@@ -399,7 +415,10 @@ def _post_mlp_kernel(
     TokSeq, SeqSlot, SeqOff, conv_scale,
     FROM_ROWS: tl.constexpr, TOPK: tl.constexpr, DECODE_STATE: tl.constexpr,
     H: tl.constexpr, BH: tl.constexpr, K: tl.constexpr,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     h = tl.arange(0, BH)
     hm = h < H
@@ -442,8 +461,10 @@ def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, deco
 @triton.jit
 def _msg_down_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, Down, G, eps,
                      GATE0: tl.constexpr, NGATE: tl.constexpr, H: tl.constexpr, BH: tl.constexpr,
-                     RANK: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr):
+                     RANK: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """g[t, j, r] = bf16(down_j @ bf16(cat(rms(h_j), rms(m_j)))) for gates j."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     pr = tl.program_id(2)
@@ -473,9 +494,11 @@ def _msg_down_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t,
 def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G, Gain, Forget,
                    Dst, dst_stride_g, dst_stride_t, SS, NBLK: tl.constexpr,
                    GATE0: tl.constexpr, NGATE: tl.constexpr, NORM: tl.constexpr,
-                   H: tl.constexpr, RANK: tl.constexpr, BC: tl.constexpr):
+                   H: tl.constexpr, RANK: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """o = (1 - tanh(F g)) * h + tanh(G g) * m for one H block; fp32 to Dst.
     With NORM, also writes the block's sum of squares to SS[t, j, blk]."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     pb = tl.program_id(2)
@@ -498,7 +521,9 @@ def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G
 
 @triton.jit
 def _msg_norm_kernel(Tmp, tmp_stride_g, tmp_stride_t, SS, Wn, wn_stride, Out, out_stride_g, out_stride_t, eps,
-                     NGATE: tl.constexpr, NBLK: tl.constexpr, H: tl.constexpr, BH: tl.constexpr):
+                     NGATE: tl.constexpr, NBLK: tl.constexpr, H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     b = tl.arange(0, NBLK)
@@ -565,3 +590,6 @@ def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=No
             tmp, tmp.stride(0), tmp.stride(1), ss, norm_w, norm_w.stride(0), out, out.stride(0), out.stride(1),
             cfg.rms_eps, NGATE=n_gate, NBLK=nblk_p2, H=h, BH=triton.next_power_of_2(h), num_warps=8,
         )
+
+
+_pdl_enable(_depth_attn_kernel, _qkv_post_kernel, _post_attn_kernel, _router_topk_kernel, _topk_kernel, _moe_sum_kernel, _post_mlp_kernel, _msg_down_kernel, _msg_up_kernel, _msg_norm_kernel)

@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 G4 = 4  # padded GQA group (3 query heads per KV head for Inkling-2-Mini)
 
 
@@ -82,7 +84,10 @@ def _attn_kernel(
     WINDOW: tl.constexpr,  # 0 = full causal
     RING: tl.constexpr,  # ring capacity for local layers (0 = contiguous cache)
     TOK: tl.constexpr, BN: tl.constexpr, NSPLIT: tl.constexpr,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     tile = tl.program_id(0)
     kvh = tl.program_id(1)
     split = tl.program_id(2)
@@ -174,7 +179,9 @@ def _attn_kernel(
 
 @triton.jit
 def _combine_kernel(PartAcc, PartML, Sinks, sink_stride_t, Gate, gate_stride_t, Out, out_stride_t,
-                    H: tl.constexpr, D: tl.constexpr, NSPLIT: tl.constexpr):
+                    H: tl.constexpr, D: tl.constexpr, NSPLIT: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
     h = tl.program_id(1)
     sp = tl.arange(0, NSPLIT)
@@ -227,8 +234,10 @@ def inkling_attention(q, k_new, v_new, k_cache, v_cache, rel, sinks, gate, meta:
 @triton.jit
 def _store_kv_kernel(KN, VN, kn_stride_t, KCache, VCache, cache_stride_slot, cache_stride_pos,
                      SeqSlot, SeqStart, SeqOff, SeqN, RING: tl.constexpr, W: tl.constexpr,
-                     KVD: tl.constexpr):
+                     KVD: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """One program per (seq, token-in-seq). Ring caches keep only the last RING tokens."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     sq = tl.program_id(0)
     i = tl.program_id(1)
     n = tl.load(SeqN + sq)
@@ -253,3 +262,6 @@ def store_kv(k_new, v_new, k_cache, v_cache, meta: AttnMeta, ring: int, max_new:
         k_new, v_new, k_new.stride(0), k_cache, v_cache, k_cache.stride(0), k_cache.stride(1),
         meta.seq_slot, meta.seq_start, meta.seq_off, meta.seq_n, RING=ring, W=0, KVD=kvd, num_warps=4,
     )
+
+
+_pdl_enable(_attn_kernel, _combine_kernel, _store_kv_kernel)

@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .pdl import PDL_ON, enable as _pdl_enable
+
 from ..quant import ExpertWeight
 
 
@@ -144,7 +146,10 @@ def _moe_gemv_kernel(
     ACT: tl.constexpr,  # 1: fused swiglu (w13), 0: scale by routing weight (w2)
     GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
     BN: tl.constexpr, BK: tl.constexpr, HW_FP4: tl.constexpr = True,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     tl.static_assert(K % BK == 0)
     r = tl.program_id(0)
     pn = tl.program_id(1)
@@ -240,7 +245,10 @@ def _grouped_kernel(
     N, K: tl.constexpr,
     FMT: tl.constexpr, ACT: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     tile = tl.program_id(0)
     pn = tl.program_id(1)
     start = tl.load(TileStart + tile)
@@ -392,3 +400,6 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
         rows_out, rows_out.stride(0), wts_pair, row_src, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=16,
     )
     return rows_out[:p]
+
+
+_pdl_enable(_moe_gemv_kernel, _grouped_kernel, _grouped_tuned)
