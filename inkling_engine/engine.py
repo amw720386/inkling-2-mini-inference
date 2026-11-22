@@ -24,6 +24,7 @@ from .sampling import Sampling, accept_sampled, probs, sample
 from .weights import load_weights
 
 VERIFY_WIDTHS = (2, 4, 8)
+IMAGE_TOKEN_ID = 200054
 
 
 def _drain(gen):
@@ -90,10 +91,14 @@ class VerifyGraph:
 class Engine:
     def __init__(self, model_dir: str, max_ctx: int = 32768, spec: bool = True, spec_threshold: float = 0.8,
                  prefill_chunk: int = 2048, graphs: bool = True, dense_fp8: bool = False, kv_fp8: bool = False,
-                 slots: int = 1):
+                 slots: int = 1, vision: bool = False):
         """slots: concurrent sequences (cache slots and batched decode graphs 1..slots). Speculation and prefix
         reuse apply to slot 0, which the scheduler gives to a request running alone."""
         self.slots = slots
+        self.vision = None
+        if vision:
+            from .vision import VisionEncoder
+            self.vision = VisionEncoder(model_dir)
         self.cfg = InklingConfig.from_pretrained(model_dir)
         self.w = load_weights(self.cfg, model_dir)
         ring = self.cfg.sliding_window + 64
@@ -175,10 +180,10 @@ class Engine:
         self.gamma = min(8.0, max(0.5, self.gamma - 0.05 * err))
 
     # ------------------------------------------------------------------ prefill
-    def prefill_slot(self, slot: int, ids: list[int]) -> torch.Tensor:
+    def prefill_slot(self, slot: int, ids: list[int], image_feats=None) -> torch.Tensor:
         """Fresh prefill of `ids` into a non-zero slot (no prefix reuse). Returns last logits."""
         assert slot != 0
-        return _drain(self.prefill_steps(slot, ids))[0]
+        return _drain(self.prefill_steps(slot, ids, image_feats))[0]
 
     # ----------------------------------------------------------- prefix reuse
     def _snapshot(self, ids: list[int]):
@@ -212,18 +217,22 @@ class Engine:
             d.f_rnn.copy_(f)
             d.length = length
 
-    def prefill(self, ids: list[int]) -> tuple[torch.Tensor, int]:
+    def prefill(self, ids: list[int], image_feats=None) -> tuple[torch.Tensor, int]:
         """Bring slot 0 to `ids`; see prefill_steps. Returns (last logits, reused tokens)."""
-        return _drain(self.prefill_steps(0, ids))
+        return _drain(self.prefill_steps(0, ids, image_feats))
 
     @torch.inference_mode()
-    def prefill_steps(self, slot: int, ids: list[int]):
+    def prefill_steps(self, slot: int, ids: list[int], image_feats=None):
         """Generator: prefill `ids` into `slot` one chunk per step (yields between chunks so a scheduler can
         interleave decode steps); returns (last logits, reused tokens). Slot 0 reuses (a) everything processed
         so far when `ids` extends it, or (b) the previous prompt's snapshot when `ids` extends that prompt (a
         chat turn whose template re-renders the earlier answer); other slots start fresh."""
         start = 0
-        if slot == 0:
+        img_pos = [i for i, t in enumerate(ids) if t == IMAGE_TOKEN_ID]
+        if img_pos and (image_feats is None or image_feats.shape[0] != len(img_pos)):
+            raise ValueError(f"{len(img_pos)} image placeholder tokens but "
+                             f"{0 if image_feats is None else image_feats.shape[0]} image features")
+        if slot == 0 and not img_pos:  # placeholder ids do not identify the image: never reuse those
             prev = self.state_ids
             drafter_ok = lambda n: self.drafter is None or self.drafter.length == n  # noqa: E731
             if 0 < len(prev) < len(ids) and ids[:len(prev)] == prev and drafter_ok(len(prev)):
@@ -236,10 +245,16 @@ class Engine:
             if self.drafter is not None:
                 self.drafter.reset(slot)
         logits = None
+        img = torch.tensor(img_pos, dtype=torch.long) if img_pos else None
         for s in range(start, len(ids), self.prefill_chunk):
             part = ids[s:s + self.prefill_chunk]
             b = Batch.build([SeqChunk(slot, s, len(part), "last")], [part])
-            logits = self.model.forward(b, self.cache, self.pws)
+            ef = None
+            if img is not None:
+                sel = ((img >= s) & (img < s + len(part))).nonzero()[:, 0]
+                if len(sel):
+                    ef = ((img[sel] - s).to(self.pws.blk.device), image_feats[sel.to(image_feats.device)])
+            logits = self.model.forward(b, self.cache, self.pws, embed_feats=ef)
             if self.drafter is not None:
                 self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
             if s + self.prefill_chunk < len(ids):
@@ -257,7 +272,7 @@ class Engine:
 
     @torch.inference_mode()
     def stream(self, ids: list[int], max_new: int, stop_ids=(), sampling: "Sampling | None" = None,
-               spec: bool | None = None, stats: "GenStats | None" = None):
+               spec: bool | None = None, stats: "GenStats | None" = None, image_feats=None):
         """Yield generated token ids, with DSpark speculation when enabled (greedy: longest matching prefix;
         sampled: rejection sampling, exact for the target distribution)."""
         sp = sampling or Sampling()
@@ -275,7 +290,7 @@ class Engine:
                 self.drafter.seed.fill_(sp.seed & 0x7FFFFFFF)
         torch.cuda.synchronize()
         t0 = time.time()
-        logits, st.reused_tokens = self.prefill(ids)
+        logits, st.reused_tokens = self.prefill(ids, image_feats)
         tok = self._sample(logits, sp, gen)
         torch.cuda.synchronize()
         st.prefill_s = time.time() - t0

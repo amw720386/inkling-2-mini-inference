@@ -20,7 +20,7 @@ cache_vol = modal.Volume.from_name("inkling2-engine-cache", create_if_missing=Tr
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git")
-    .pip_install("torch==2.9.1", index_url="https://download.pytorch.org/whl/cu128")
+    .pip_install("torch==2.9.1", "torchvision==0.24.1", index_url="https://download.pytorch.org/whl/cu128")
     .pip_install(
         "safetensors>=0.5",
         "numpy",
@@ -30,6 +30,7 @@ image = (
         "jinja2",
         "accelerate",
         "fastapi",
+        "pillow",
         "uvicorn",
         "requests",
         f"transformers @ git+https://github.com/huggingface/transformers.git@{TRANSFORMERS_SHA}",

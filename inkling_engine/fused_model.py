@@ -136,7 +136,8 @@ class FusedModel:
     # ----------------------------------------------------------------- forward
     @torch.no_grad()
     def forward(self, batch: Batch, cache: InklingCache, ws: Workspace, meta: StepMeta | None = None,
-                decode_state: bool | None = None, n_out: int | None = None, verify: bool = False):
+                decode_state: bool | None = None, n_out: int | None = None, verify: bool = False,
+                embed_feats: tuple | None = None):
         """verify: one sequence whose conv states must stay rollback-able; candidates go to cache.cand."""
         c, w = self.cfg, self.w
         meta = meta or self.step_meta(batch)
@@ -151,6 +152,9 @@ class FusedModel:
         pos = batch.positions
         blk = ws.blk[:, :T]
         ws.blk[0, :T] = ref.rms_norm(F.embedding(batch.input_ids, w.embed), w.embed_norm, c.rms_eps)
+        if embed_feats is not None:  # image features replace the normed embeddings of their placeholders
+            rows, feats = embed_feats
+            ws.blk[0, rows] = feats
         nb = 0
         pre_nb = None
         for v in self.visits:

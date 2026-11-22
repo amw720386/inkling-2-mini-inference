@@ -125,6 +125,49 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+IMAGE_TYPES = ("image", "image_url", "input_image")
+
+
+def has_images(messages) -> bool:
+    return any(isinstance(m.get("content"), list) and any(isinstance(p, dict) and p.get("type") in IMAGE_TYPES
+                                                          for p in m["content"]) for m in messages)
+
+
+def _load_image(src: str):
+    import base64
+    import io
+
+    from PIL import Image
+
+    if src.startswith("data:"):
+        data = base64.b64decode(src.split(",", 1)[1])
+    else:
+        import urllib.request
+
+        with urllib.request.urlopen(src, timeout=30) as f:
+            data = f.read()
+    return Image.open(io.BytesIO(data)).convert("RGB")
+
+
+def load_images(messages):
+    """OpenAI image parts (image_url with data: or http(s) URL) -> {"type": "image", "image": PIL.Image}."""
+    out = []
+    for m in messages:
+        if isinstance(m.get("content"), list):
+            parts = []
+            for p in m["content"]:
+                if isinstance(p, dict) and p.get("type") in IMAGE_TYPES:
+                    src = p.get("image_url") or p.get("image") or p.get("url")
+                    if isinstance(src, dict):
+                        src = src.get("url")
+                    parts.append({"type": "image", "image": _load_image(src) if isinstance(src, str) else src})
+                else:
+                    parts.append(p)
+            m = {**m, "content": parts}
+        out.append(m)
+    return out
+
+
 def tool_call_obj(name, args, index):
     return {"index": index, "id": "call_" + uuid.uuid4().hex[:24], "type": "function",
             "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
@@ -143,13 +186,19 @@ class Server:
                 self.stop_ids.add(tid)
 
     # --------------------------------------------------------------- requests
-    def chat_ids(self, body: dict) -> list[int]:
+    def chat_ids(self, body: dict):
+        """(input ids, image features or None) of a chat request."""
         kwargs = dict(body.get("chat_template_kwargs") or {})
         if "reasoning_effort" in body:
             kwargs["reasoning_effort"] = body["reasoning_effort"]
-        enc = self.tok.apply_chat_template(normalize_messages(body["messages"]), tools=body.get("tools"), tokenize=True,
+        messages = normalize_messages(body["messages"])
+        if has_images(messages):
+            if self.engine.vision is None:
+                raise ValueError("image input needs the server started with vision enabled")
+            return self.engine.vision.chat_inputs(load_images(messages), tools=body.get("tools"), **kwargs)
+        enc = self.tok.apply_chat_template(messages, tools=body.get("tools"), tokenize=True,
                                            add_generation_prompt=True, return_dict=True, **kwargs)
-        return [int(i) for i in enc["input_ids"]]
+        return [int(i) for i in enc["input_ids"]], None
 
     @staticmethod
     def sampling(body: dict):
@@ -196,7 +245,7 @@ def build_app(server: Server):
     async def health():
         return {"ok": True}
 
-    async def generate(ids, body, chat: bool):
+    async def generate(ids, body, chat: bool, image_feats=None):
         rid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         created = int(time.time())
         loop = asyncio.get_running_loop()
@@ -214,7 +263,7 @@ def build_app(server: Server):
                 loop.call_soon_threadsafe(q.put_nowait, t)
 
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
-        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token)
+        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats)
         split = Splitter()
         toks: list[int] = []
         prev_text = ""
@@ -244,8 +293,11 @@ def build_app(server: Server):
     @app.post("/v1/chat/completions")
     async def chat(req: Request):
         body = await req.json()
-        ids = server.chat_ids(body)
-        return await respond(ids, body, chat=True)
+        try:
+            ids, feats = server.chat_ids(body)
+        except ValueError as e:
+            return JSONResponse({"error": {"message": str(e), "type": "invalid_request_error"}}, status_code=400)
+        return await respond(ids, body, chat=True, image_feats=feats)
 
     @app.post("/v1/completions")
     async def completions(req: Request):
@@ -254,14 +306,14 @@ def build_app(server: Server):
         ids = prompt if isinstance(prompt, list) else server.tok.encode(prompt, add_special_tokens=False)
         return await respond(ids, body, chat=False)
 
-    async def respond(ids, body, chat: bool):
+    async def respond(ids, body, chat: bool, image_feats=None):
         stream = bool(body.get("stream"))
         obj = "chat.completion" if chat else "text_completion"
         if stream:
             n_calls = [0]
 
             async def sse():
-                async for ev in generate(ids, body, chat):
+                async for ev in generate(ids, body, chat, image_feats):
                     if ev[0] == "delta":
                         _, r, c, calls = ev
                         if not (r or c or calls):
@@ -289,7 +341,7 @@ def build_app(server: Server):
             return StreamingResponse(sse(), media_type="text/event-stream")
         reasoning, content, calls = [], [], []
         final = None
-        async for ev in generate(ids, body, chat):
+        async for ev in generate(ids, body, chat, image_feats):
             if ev[0] == "delta":
                 reasoning.append(ev[1])
                 content.append(ev[2])
@@ -327,6 +379,7 @@ def main():
     ap.add_argument("--no-spec", action="store_true")
     ap.add_argument("--dense-fp8", action="store_true")
     ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
+    ap.add_argument("--no-vision", action="store_true", help="text only (skips loading the 0.6 GB vision tower)")
     ap.add_argument("--model-id", default="inkling-2-mini")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -337,7 +390,7 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(a.model)
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
-                 kv_fp8=a.kv_fp8, slots=a.slots)
+                 kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision)
     uvicorn.run(build_app(Server(eng, tok, a.model_id)), host=a.host, port=a.port, log_level="info")
 
 

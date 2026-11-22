@@ -38,6 +38,7 @@ class Request:
     t_decode: float = 0.0
     t_start: float = 0.0
     prefill_gen: object = None
+    image_feats: object = None
 
 
 class Scheduler:
@@ -51,8 +52,8 @@ class Scheduler:
         self.thread.start()
 
     # ------------------------------------------------------------------ API
-    def submit(self, ids, max_new, stop, sp: Sampling, on_token) -> Request:
-        req = Request(list(ids), max_new, set(stop), sp, on_token)
+    def submit(self, ids, max_new, stop, sp: Sampling, on_token, image_feats=None) -> Request:
+        req = Request(list(ids), max_new, set(stop), sp, on_token, image_feats=image_feats)
         self.inbox.put(req)
         return req
 
@@ -127,7 +128,7 @@ class Scheduler:
             req.gen.manual_seed(req.sp.seed)
         req.slot = slot
         req.t_start = time.time()
-        req.prefill_gen = e.prefill_steps(slot, req.ids)
+        req.prefill_gen = e.prefill_steps(slot, req.ids, req.image_feats)
         self.prefilling.append(req)
 
     def _prefill_step(self, req: Request):

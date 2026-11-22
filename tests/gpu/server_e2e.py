@@ -24,7 +24,7 @@ from transformers import AutoTokenizer  # noqa: E402
 import uvicorn  # noqa: E402
 
 tok = AutoTokenizer.from_pretrained(path)
-eng = Engine(path, max_ctx=32768, spec=True)
+eng = Engine(path, max_ctx=32768, spec=True, vision=True)
 server = Server(eng, tok, "inkling-2-mini")
 app = build_app(server)
 cfg = uvicorn.Config(app, host="127.0.0.1", port=8011, log_level="warning")
@@ -116,6 +116,23 @@ with requests.post(B + "/chat/completions", json={"messages": tmsgs[:1], "tools"
             fin = ev["choices"][0].get("finish_reason") or fin
 print("streamed tool call:", fin, [c["function"]["name"] for c in stream_calls])
 ok &= fin == "tool_calls" and stream_calls and stream_calls[0]["function"]["name"] == "get_weather"
+
+# image input (OpenAI image_url with a base64 data URL)
+import base64, io  # noqa: E401,E402
+from PIL import Image, ImageDraw  # noqa: E402
+
+im = Image.new("RGB", (320, 240), (30, 160, 40))
+ImageDraw.Draw(im).ellipse((100, 60, 220, 180), fill=(250, 250, 0))
+buf = io.BytesIO()
+im.save(buf, format="PNG")
+url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+r = requests.post(B + "/chat/completions", json={"messages": [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": url}},
+    {"type": "text", "text": "What shape and colors do you see? One sentence."}]}], "max_tokens": 200,
+    "reasoning_effort": "none"}).json()
+img_ans = r["choices"][0]["message"]["content"] or ""
+print("image answer:", repr(img_ans))
+ok &= ("circle" in img_ans.lower() or "yellow" in img_ans.lower())
 
 # client disconnect mid-stream must stop generation and free the slot
 with requests.post(B + "/completions", json={"prompt": "Write a very long story about a dragon.", "max_tokens": 3000,

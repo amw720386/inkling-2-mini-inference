@@ -12,8 +12,9 @@ path is a small set of fused Triton kernels captured in CUDA graphs, with DSpark
 | Correctness | state handling (KV cache, sliding ring, conv states, loop passes) bit-exact in an fp64 check; logits within bf16 noise of transformers; greedy speculative output equal to plain greedy when verify and decode run the same kernels |
 | Decode | fused per-token kernels, one CUDA graph per step; NVFP4 experts decoded with the hardware `cvt.e2m1x2`; grouped expert GEMMs for multi-token steps |
 | Speculation | DSpark drafter (3 block layers + Markov head), verify widths 2/4/8 picked from measured costs and calibrated draft confidences; greedy (longest matching prefix) and sampled requests (speculative rejection sampling, exact for the target distribution: 195 vs 150 tok/s at temperature 1) |
-| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, sampling, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests: ~300 tok/s aggregate at 4 concurrent; a request decoding alone in any slot speculates (per-slot draft contexts and verify graphs) |
+| Serving | OpenAI-compatible server (chat + completions, streaming, reasoning split, tool calling, image input, sampling, prefix reuse across chat turns, cancel on disconnect); continuous batching over `--slots` (default 4) concurrent requests: ~300 tok/s aggregate at 4 concurrent; a request decoding alone in any slot speculates (per-slot draft contexts and verify graphs) |
 | Options | `dense_fp8`: row-scaled FP8 copies of the attention projections and LM head (faster, not bit-faithful to the bf16 checkpoint) |
+| Images | transformers' vision tower + processor; features spliced at the image placeholders. Greedy output on an image prompt equals transformers' for 40/40 tokens (`tests/gpu/vision_check.py`) |
 | Long context | `kv_fp8`: E4M3 cache for the full-attention layers; 256k context fits in 32 GiB (25.3 GiB after start-up), 123 tok/s DSpark decode at 131k |
 
 ## Performance
@@ -59,7 +60,8 @@ bench/             SGLang baseline results and a survey of other Inkling 2 engin
 
 ```bash
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
-pip install safetensors tokenizers transformers fastapi uvicorn
+pip install torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+pip install safetensors tokenizers transformers fastapi uvicorn pillow
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark, 4 slots x 32k
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144
 ```
