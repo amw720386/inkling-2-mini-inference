@@ -114,3 +114,15 @@ def test_fp8_mm():
     err_seg = ((seg.float() - ref[:, 1024:1536]).norm() / ref[:, 1024:1536].norm()).item()
     print("fp8_mm rel err vs dequantized-weight GEMM", err, "segment", err_seg)
     assert err < 0.04 and err_seg < 0.04
+
+
+def test_penalties():
+    from inkling_engine.sampling import Sampling, apply_penalties
+
+    logits = torch.tensor([2.0, -1.0, 0.5, 3.0, 0.0], device="cuda")
+    sp = Sampling(presence_penalty=0.5, frequency_penalty=0.25, repetition_penalty=2.0)
+    assert sp.penalized and not Sampling().penalized
+    row = apply_penalties(logits, sp, prompt=[1], out=[3, 3, 0])
+    exp = torch.tensor([2.0 / 2 - 0.5 - 0.25, -1.0 * 2, 0.5, 3.0 / 2 - 0.5 - 0.5, 0.0], device="cuda")
+    assert torch.allclose(row, exp), (row, exp)
+    assert torch.equal(logits, torch.tensor([2.0, -1.0, 0.5, 3.0, 0.0], device="cuda"))  # input untouched

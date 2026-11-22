@@ -13,6 +13,28 @@ class Sampling:
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
+    presence_penalty: float = 0.0  # OpenAI: logit -= presence * [count > 0] + frequency * count (output tokens)
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0  # HF style over prompt + output: positive logits / r, negative * r
+
+    @property
+    def penalized(self) -> bool:
+        return self.presence_penalty != 0 or self.frequency_penalty != 0 or self.repetition_penalty != 1.0
+
+
+def apply_penalties(logits: torch.Tensor, sp: Sampling, prompt: list[int], out: list[int]) -> torch.Tensor:
+    """Penalized copy of one logits row [V]."""
+    row = logits.reshape(-1).float().clone()
+    v = row.shape[0]
+    dev = row.device
+    if sp.repetition_penalty != 1.0:
+        seen = torch.tensor(sorted(set(prompt) | set(out)), dtype=torch.long, device=dev)
+        x = row[seen]
+        row[seen] = torch.where(x > 0, x / sp.repetition_penalty, x * sp.repetition_penalty)
+    if (sp.presence_penalty or sp.frequency_penalty) and out:
+        cnt = torch.bincount(torch.tensor(out, dtype=torch.long, device=dev), minlength=v).float()
+        row -= sp.presence_penalty * (cnt > 0).float() + sp.frequency_penalty * cnt
+    return row
 
 
 def probs(logits: torch.Tensor, sp: Sampling) -> torch.Tensor:

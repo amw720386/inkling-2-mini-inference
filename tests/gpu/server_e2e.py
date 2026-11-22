@@ -187,5 +187,11 @@ with requests.post(B + "/chat/completions", json={"messages": [{"role": "user", 
             usage = ev.get("usage") or usage
 print("chat logprob entries:", len(entries), "completion tokens:", usage["completion_tokens"])
 ok &= len(entries) == usage["completion_tokens"] and all(len(e["top_logprobs"]) == 2 for e in entries)
+# a strong frequency penalty stops greedy repetition
+body = {"prompt": "Repeat after me: la la la la la la la la", "max_tokens": 24, "temperature": 0}
+plain = requests.post(B + "/completions", json=body).json()["choices"][0]["text"]
+pen = requests.post(B + "/completions", json={**body, "frequency_penalty": 2.0}).json()["choices"][0]["text"]
+print("penalty:", repr(plain[:60]), "->", repr(pen[:60]))
+ok &= pen.count("la") < plain.count("la") or plain.count("la") == 0
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

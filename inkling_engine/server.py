@@ -223,7 +223,10 @@ class Server:
         d = self.defaults
         pick = lambda k, dv: body[k] if body.get(k) is not None else d.get(k, dv)  # noqa: E731
         return Sampling(temperature=float(pick("temperature", 0.0) or 0.0), top_p=float(pick("top_p", 1.0)),
-                        top_k=int(pick("top_k", 0) or 0), seed=body.get("seed"))
+                        top_k=int(pick("top_k", 0) or 0), seed=body.get("seed"),
+                        presence_penalty=float(body.get("presence_penalty") or 0.0),
+                        frequency_penalty=float(body.get("frequency_penalty") or 0.0),
+                        repetition_penalty=float(body.get("repetition_penalty") or 1.0))
 
     def run(self, ids, body, on_token):
         """Generate under the lock, calling on_token(token_id) per token. Returns (tokens, stats)."""

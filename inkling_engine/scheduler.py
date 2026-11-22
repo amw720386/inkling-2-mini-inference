@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import torch
 
 from .engine import VERIFY_WIDTHS, Engine, GenStats
-from .sampling import Sampling, sample
+from .sampling import Sampling, apply_penalties, sample
 
 
 @dataclass
@@ -183,11 +183,11 @@ class Scheduler:
         e = self.e
         if req.sp.seed is not None and e.drafter is not None:
             e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
-        tok = sample(logits, req.sp, req.gen)
+        tok = sample(apply_penalties(logits, req.sp, req.ids, []) if req.sp.penalized else logits, req.sp, req.gen)
         if req.logprobs is not None:
             req.lp.append(token_logprobs(logits, tok, req.logprobs))
         req.stats.prefill_s = time.time() - req.t_start
-        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec and req.logprobs is None
+        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec and req.logprobs is None and not req.sp.penalized
         req.t_decode = time.time()
         self.active[req.slot] = req
         req.on_token(tok)
@@ -248,11 +248,15 @@ class Scheduler:
             for i, r in enumerate(reqs):
                 if r.spec_ok:
                     e.drafter.commit(g.ws.taps[i:i + 1], r.P, slot=r.slot)
-        greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
+        greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0 and not r.sp.penalized]
         picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}  # one sync
         for i, r in enumerate(reqs):
             r.P += 1
-            t = picks[i] if i in picks else sample(lg[i], r.sp, r.gen)
+            if i in picks:
+                t = picks[i]
+            else:
+                row = apply_penalties(lg[i], r.sp, r.ids, r.out) if r.sp.penalized else lg[i]
+                t = sample(row, r.sp, r.gen)
             if r.logprobs is not None:
                 r.lp.append(token_logprobs(lg[i], t, r.logprobs))
             r.out.append(t)
