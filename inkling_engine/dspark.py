@@ -116,7 +116,7 @@ class Drafter:
         self.rnn_w, self.rnn_b = t[mh + "rnn_proj.weight"], t[mh + "rnn_proj.bias"]
         # step-dependent columns [state, W1[prev]] vs step-independent [h_i, f_rnn] (precomputed per round)
         self.rnn_w_step = self.rnn_w[:, :2 * RANK].contiguous()
-        self.rnn_w_rest = self.rnn_w[:, 2 * RANK:].float().t().contiguous()  # fp32 [4608, 768]
+        self.rnn_w_rest = self.rnn_w[:, 2 * RANK:].t().contiguous()  # bf16 [4608, 768] (tensor-core GEMM)
         self.f_norm = t[mh + "dflare_norm.weight"]
         D, V = self.embed.shape[1], self.head.shape[0]
         z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=device)  # noqa: E731
@@ -259,9 +259,9 @@ class Drafter:
             res, xn = add_rms(res, m, nxt, EPS)
         h = xn[1:].contiguous()  # [7, D]
         base = dense_mm(h, self.head8, self.base_out).float()
-        cand_base, ci = base.topk(CANDIDATES, dim=-1)
+        cand_base, ci = base.topk(CANDIDATES, dim=-1, sorted=False)  # order is irrelevant to the head
         cand = self.short_ids[ci]  # shortlist positions -> token ids
-        rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest  # [7, 768]
+        rest = (torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1) @ self.rnn_w_rest).float()  # [7, 768]
         if self.fused_head:
             self.cand_buf.copy_(cand)
             self.head_kernels.run(rest.contiguous(), cand_base.contiguous(), self.cand_buf, self.rnn_w_step,
@@ -338,10 +338,10 @@ class Drafter:
         base = dense_mm(h, self.head8, self.m_base[:GAMMA * k]).float()
         for i, s_ in enumerate(slots):
             r = slice(GAMMA * i, GAMMA * (i + 1))
-            cand_base, ci = base[r].topk(CANDIDATES, dim=-1)
+            cand_base, ci = base[r].topk(CANDIDATES, dim=-1, sorted=False)
             cand = self.short_ids[ci]
             f = self.ctxs[s_]["f"]
-            rest = torch.cat([h[r], f[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest
+            rest = (torch.cat([h[r], f[None].expand(GAMMA, -1)], dim=1) @ self.rnn_w_rest).float()
             self.m_cand[i].copy_(cand)
             self.m_heads[i].run(rest.contiguous(), cand_base.contiguous(), self.m_cand[i], self.rnn_w_step,
                                 self.rnn_b, self.w1, self.m_anchor[i:i + 1], self.fold_w, self.fold_b, self.m_tok[i],

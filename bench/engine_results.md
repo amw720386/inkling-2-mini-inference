@@ -9,7 +9,7 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 165.2 tok/s | 321.2 tok/s | 155.3 tok/s | 307.7 tok/s |
+| bf16 | 167.5 tok/s | 328.1 tok/s | 158.4 tok/s | 310.1 tok/s |
 | `dense_fp8` | 204.6 tok/s | 342.4 tok/s | 189.0 tok/s | 310.6 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
@@ -46,7 +46,8 @@ token frequency over 15 MB of Python / C sources and 16 MB of English text from 
 Acceptance changed little (up on 4 of 6 prompts); DSpark 294 -> 321 tok/s, 8k-prompt DSpark 287 -> 308, temperature 1
 218 -> 239; 2 / 4 concurrent requests 372 / 399 tok/s. Shortlist size (`INKLING_DRAFT_SHORTLIST`, DSpark greedy / 8k /
 temperature 1): 16k 318 / 293 / 211, 32k 321-324 / 306-308 / 236-239, 64k 315-319 / 307-308 / 239-247 tok/s; 32k
-stays the default (64k's edge at temperature 1 is within run-to-run noise).
+stays the default (64k's edge at temperature 1 is within run-to-run noise). Unsorted candidate top-k and a bf16
+tensor-core GEMM for the Markov head's step-independent projection: draft 0.63 -> 0.58 ms (4 slots: 1.42 ms).
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
