@@ -210,8 +210,9 @@ class FusedModel:
                 shared = True
             elif msgs:
                 ar = ws.ar[:nq, :T]
-                fk.depth_attn(blk, nb + 1, w.attn_queries[layer], ar, out_f32=True)
-                fk.depth_attn(ws.bank[:, :T], 2, w.loop_queries[layer - c.core_start], ws.msgs[:, :T], out_f32=True)
+                fk.depth_attn2(blk, nb + 1, w.attn_queries[layer], ar,
+                               ws.bank[:, :T], 2, w.loop_queries[layer - c.core_start].reshape(-1, c.hidden_size),
+                               ws.msgs[:, :T], eps=c.rms_eps)
                 hs = ar.expand(3, -1, -1) if local else ar
                 fk.msg_gates(hs, ws.msgs[:3, :T], lw, 0, 3, ws.gbuf[:T], xn, c, norm_w=ex.qkv_norm,
                              tmp=ws.tmp[:, :T])

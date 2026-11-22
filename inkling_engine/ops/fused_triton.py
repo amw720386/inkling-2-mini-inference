@@ -93,6 +93,39 @@ def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_
         tl.store(dst, o.to(tl.bfloat16), mask=hm)
 
 
+@triton.jit
+def _depth_attn2_kernel(SrcA, a_stride_s, a_stride_t, nsa, QA, OutA, oa_stride_q, oa_stride_t, NQA: tl.constexpr,
+                        SrcB, b_stride_s, b_stride_t, nsb, QB, OutB, ob_stride_q, ob_stride_t, eps,
+                        H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    """Two unnormalized depth attentions in one launch: queries 0..NQA-1 over source set A, the rest over B
+    (a loop visit's attention input and its messages). fp32 outputs."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    t = tl.program_id(0).to(tl.int64)
+    qi = tl.program_id(1)
+    h = tl.arange(0, BH)
+    hm = h < H
+    if qi < NQA:
+        q = tl.load(QA + qi * H + h, mask=hm, other=0.0)
+        o = _depth_attn_row(SrcA, a_stride_s, t * a_stride_t, nsa, SrcA, 0, False, q, hm, H, BH, eps)
+        tl.store(OutA + qi * oa_stride_q + t * oa_stride_t + h, o, mask=hm)
+    else:
+        qb = qi - NQA
+        q = tl.load(QB + qb * H + h, mask=hm, other=0.0)
+        o = _depth_attn_row(SrcB, b_stride_s, t * b_stride_t, nsb, SrcB, 0, False, q, hm, H, BH, eps)
+        tl.store(OutB + qb * ob_stride_q + t * ob_stride_t + h, o, mask=hm)
+
+
+def depth_attn2(src_a, ns_a: int, q_a, out_a, src_b, ns_b: int, q_b, out_b, eps=1e-6):
+    _, t, h = src_a.shape
+    nqa, nqb = q_a.shape[0], q_b.shape[0]
+    _depth_attn2_kernel[(t, nqa + nqb)](
+        src_a, src_a.stride(0), src_a.stride(1), ns_a, q_a, out_a, out_a.stride(0), out_a.stride(1), nqa,
+        src_b, src_b.stride(0), src_b.stride(1), ns_b, q_b, out_b, out_b.stride(0), out_b.stride(1), eps,
+        H=h, BH=triton.next_power_of_2(h), num_warps=8,
+    )
+
+
 def depth_attn(src, ns: int, queries, out, *, extra=None, norm_w=None, out_f32=False, eps=1e-6):
     """src: [S, T, H] bf16 (first ns slots used); queries fp32 [Q, H] (pre-scaled);
     out: [Q, T, H] (bf16, or fp32 when out_f32). norm_w: [Q, H] bf16 or None."""
@@ -527,9 +560,12 @@ def _msg_down_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t,
 def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G, Gain, Forget,
                    Dst, dst_stride_g, dst_stride_t, SS, NBLK: tl.constexpr,
                    GATE0: tl.constexpr, NGATE: tl.constexpr, NORM: tl.constexpr,
-                   H: tl.constexpr, RANK: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
-    """o = (1 - tanh(F g)) * h + tanh(G g) * m for one H block; fp32 to Dst.
-    With NORM, also writes the block's sum of squares to SS[t, j, blk]."""
+                   H: tl.constexpr, RANK: tl.constexpr, BC: tl.constexpr,
+                   Counter=None, Wn=None, wn_stride=0, Out=None, out_stride_g=0, out_stride_t=0, eps=1e-6,
+                   BH: tl.constexpr = 4096, PDL: tl.constexpr = PDL_ON):
+    """o = (1 - tanh(F g)) * h + tanh(G g) * m for one H block; fp32 to Dst. With NORM, each block also
+    writes its sum of squares to SS[t, j, blk], and the block that finishes last for (t, j) (atomic counter)
+    applies the RMS norm with weight to the whole row, writing bf16 Out."""
     if PDL:
         tl.extra.cuda.gdc_wait()
     t = tl.program_id(0).to(tl.int64)
@@ -550,6 +586,16 @@ def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G
     tl.store(Dst + j * dst_stride_g + t * dst_stride_t + c, o, mask=cm)
     if NORM:
         tl.store(SS + (t * NGATE + j) * NBLK + pb, tl.sum(tl.where(cm, o * o, 0.0), 0))
+        done = tl.atomic_add(Counter + t * NGATE + j, 1, sem="acq_rel")
+        if done == tl.num_programs(2) - 1:
+            b = tl.arange(0, NBLK)
+            rinv = _rms_inv(tl.sum(tl.load(SS + (t * NGATE + j) * NBLK + b, volatile=True), 0), H, eps)
+            hh = tl.arange(0, BH)
+            hm = hh < H
+            row = tl.load(Dst + j * dst_stride_g + t * dst_stride_t + hh, mask=hm, other=0.0, volatile=True) * rinv
+            row = row * tl.load(Wn + j * wn_stride + hh, mask=hm, other=0.0).to(tl.float32)
+            tl.store(Out + j * out_stride_g + t * out_stride_t + hh, row.to(tl.bfloat16), mask=hm)
+            tl.atomic_xchg(Counter + t * NGATE + j, 0)
 
 
 @triton.jit
@@ -608,21 +654,21 @@ def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=No
     dst = tmp if norm else out
     if norm:
         assert tmp is not None and tmp.dtype == torch.float32
-        ss = torch.zeros(t, n_gate, nblk_p2, dtype=torch.float32, device=hs.device) if _SS.get(
-            (t, n_gate, nblk_p2)) is None else _SS[(t, n_gate, nblk_p2)]
-        _SS[(t, n_gate, nblk_p2)] = ss
+        key = (hs.device.index, t, n_gate, nblk_p2)
+        if key not in _SS:  # persistent (graph-safe) block sums and counters
+            _SS[key] = (torch.zeros(t, n_gate, nblk_p2, dtype=torch.float32, device=hs.device),
+                        torch.zeros(t, n_gate, dtype=torch.int32, device=hs.device))
+        ss, counter = _SS[key]
     else:
-        ss = g_buf
+        ss, counter = g_buf, g_buf
     _msg_up_kernel[(t, n_gate, nblk)](
         hs, hs.stride(0), hs.stride(1), ms, ms.stride(0), ms.stride(1), g_buf, lw.ctl_gain, lw.ctl_forget,
         dst, dst.stride(0), dst.stride(1), ss, nblk_p2,
-        GATE0=gate0, NGATE=n_gate, NORM=norm, H=h, RANK=rank, BC=bc, num_warps=4,
+        GATE0=gate0, NGATE=n_gate, NORM=norm, H=h, RANK=rank, BC=bc,
+        Counter=counter, Wn=norm_w if norm else g_buf, wn_stride=norm_w.stride(0) if norm else 0,
+        Out=out, out_stride_g=out.stride(0), out_stride_t=out.stride(1), eps=cfg.rms_eps,
+        BH=triton.next_power_of_2(h), num_warps=4,
     )
-    if norm:
-        _msg_norm_kernel[(t, n_gate)](
-            tmp, tmp.stride(0), tmp.stride(1), ss, norm_w, norm_w.stride(0), out, out.stride(0), out.stride(1),
-            cfg.rms_eps, NGATE=n_gate, NBLK=nblk_p2, H=h, BH=triton.next_power_of_2(h), num_warps=8,
-        )
 
 
-_pdl_enable(_depth_attn_kernel, _qkv_post_kernel, _post_attn_kernel, _router_topk_kernel, _topk_kernel, _moe_sum_kernel, _post_mlp_kernel, _msg_down_kernel, _msg_up_kernel, _msg_norm_kernel)
+_pdl_enable(_depth_attn_kernel, _depth_attn2_kernel, _qkv_post_kernel, _post_attn_kernel, _router_topk_kernel, _topk_kernel, _moe_sum_kernel, _post_mlp_kernel, _msg_down_kernel, _msg_up_kernel, _msg_norm_kernel)
