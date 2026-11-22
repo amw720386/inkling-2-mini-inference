@@ -57,6 +57,15 @@ class AttnMeta:
                    n_split, max_keys)
 
 
+_ATTN_CONFIGS = [
+    triton.Config({"BN": bn}, num_warps=nw, num_stages=ns)
+    for bn in (32, 64, 128)
+    for nw in (4, 8)
+    for ns in (1, 2, 3)
+]
+
+
+@triton.autotune(configs=_ATTN_CONFIGS, key=["TOK", "NSPLIT", "WINDOW", "RING", "D", "H"])
 @triton.jit
 def _attn_kernel(
     Q, q_stride_t,  # [T, H, D] (row stride q_stride_t, head stride D)
@@ -207,8 +216,7 @@ def inkling_attention(q, k_new, v_new, k_cache, v_cache, rel, sinks, gate, meta:
         q, q.stride(0), k_new, v_new, k_new.stride(0), k_cache, v_cache, k_cache.stride(0), k_cache.stride(1),
         rel, rel.stride(0), sinks, sinks.stride(0), gate, gate.stride(0), out, out.stride(0), part_acc, part_ml,
         meta.seq_slot, meta.seq_start, meta.seq_off, meta.seq_n, meta.tile_seq, meta.tile_q0, scale,
-        H=h, KVH=kvh, D=d, R=r, WINDOW=window, RING=ring, TOK=meta.tok_per_tile, BN=bn, NSPLIT=ns,
-        num_warps=num_warps, num_stages=num_stages,
+        H=h, KVH=kvh, D=d, R=r, WINDOW=window, RING=ring, TOK=meta.tok_per_tile, NSPLIT=ns,
     )
     if ns > 1:
         _combine_kernel[(t, h)](part_acc, part_ml, sinks, sinks.stride(0), gate, gate.stride(0), out, out.stride(0),

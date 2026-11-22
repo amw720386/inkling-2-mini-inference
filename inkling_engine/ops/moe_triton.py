@@ -236,7 +236,7 @@ def moe_decode(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Exper
 def _grouped_kernel(
     X, x_stride, RowSrc, x_row_div,  # sorted row r reads X[RowSrc[r] // x_row_div]
     W, S, F, TileExpert, TileStart, TileEnd,
-    Out, out_stride, Wts,  # output row = sorted row r (w13: act buffer; w2: rows scaled by Wts[RowSrc[r]])
+    Out, out_stride, Wts, OutRow,  # w13: act at sorted row r; w2: rows at OutRow[r] scaled by Wts[OutRow[r]]
     N, K: tl.constexpr,
     FMT: tl.constexpr, ACT: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
@@ -289,22 +289,22 @@ def _grouped_kernel(
         tl.store(Out + rm.to(tl.int64)[:, None] * out_stride + no[None, :], a.to(tl.bfloat16),
                  mask=mmask[:, None] & (no < N // 2)[None, :])
     else:
-        wt = tl.load(Wts + src, mask=mmask, other=0.0)
+        orow = tl.load(OutRow + rm, mask=mmask, other=0)
+        wt = tl.load(Wts + orow, mask=mmask, other=0.0)
         acc = acc.to(tl.bfloat16).to(tl.float32) * wt[:, None]
-        tl.store(Out + rm.to(tl.int64)[:, None] * out_stride + n[None, :], acc, mask=mmask[:, None] & nmask[None, :])
+        tl.store(Out + orow.to(tl.int64)[:, None] * out_stride + n[None, :], acc, mask=mmask[:, None] & nmask[None, :])
 
 
 def moe_prefill(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: ExpertWeight, w2: ExpertWeight,
-                gate_cap: float, up_cap: float, bm: int = 64) -> torch.Tensor:
-    """Grouped path. Returns bf16 [T, H] (top-k summed in fp32)."""
+                gate_cap: float, up_cap: float, bm: int = 64, rows_out: torch.Tensor | None = None) -> torch.Tensor:
+    """Grouped path. Returns fp32 per-pair weighted rows [T*k, H] in (token, k) order (sum them per token)."""
     t, hdim = x.shape
     k = ids.shape[1]
     e, n13, _ = w13.shape
     inter = n13 // 2
-    flat = ids.reshape(-1)
+    flat = ids.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.bincount(flat, minlength=e)
-    # tiles: per expert ceil(count / bm)
     tiles_per = (counts + bm - 1) // bm
     n_tiles = int(tiles_per.sum())
     starts_e = torch.cumsum(counts, 0) - counts
@@ -313,27 +313,22 @@ def moe_prefill(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Expe
     tile_start = (starts_e[tile_expert] + tile_rank * bm).to(torch.int32)
     tile_end = torch.minimum(tile_start + bm, (starts_e + counts)[tile_expert].to(torch.int32))
     tile_expert = tile_expert.to(torch.int32)
-    row_src = order.to(torch.int32)  # sorted row -> flat pair index
+    row_src = order.to(torch.int32)  # sorted row -> (token, k) pair index
     wts_f = wts.reshape(-1).float().contiguous()
     act = torch.empty(t * k, inter, dtype=torch.bfloat16, device=x.device)
-    rows = torch.empty(t * k, hdim, dtype=torch.float32, device=x.device)
+    rows = rows_out if rows_out is not None else torch.empty(t * k, hdim, dtype=torch.float32, device=x.device)
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_f
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_f
-    bn = 64
-    _grouped_kernel[(n_tiles, triton.cdiv(n13, bn))](
+    _grouped_tuned[lambda m: (n_tiles, triton.cdiv(n13, m["BN"]))](
         x, x.stride(0), row_src, k, w13.weight, _scale_view(w13), f13, tile_expert, tile_start, tile_end,
-        act, act.stride(0), wts_f, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap,
-        BM=bm, BN=bn, BK=64, num_warps=4, num_stages=3,
+        act, act.stride(0), wts_f, row_src, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=bm,
     )
     ident = torch.arange(t * k, device=x.device, dtype=torch.int32)
-    _grouped_kernel[(n_tiles, triton.cdiv(hdim, bn))](
+    _grouped_tuned[lambda m: (n_tiles, triton.cdiv(hdim, m["BN"]))](
         act, act.stride(0), ident, 1, w2.weight, _scale_view(w2), f2, tile_expert, tile_start, tile_end,
-        rows, rows.stride(0), wts_f[order].contiguous(), hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap,
-        BM=bm, BN=bn, BK=64, num_warps=4, num_stages=3,
+        rows, rows.stride(0), wts_f, row_src, hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap, BM=bm,
     )
-    out = torch.zeros(t * k, hdim, dtype=torch.float32, device=x.device)
-    out[order] = rows
-    return out.view(t, k, hdim).sum(1).to(torch.bfloat16)
+    return rows
 
 
 # ------------------------------------------------------------- grouped small-M path
@@ -354,7 +349,7 @@ def _prune_grouped(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-_grouped_tuned = triton.autotune(configs=_GROUPED_CONFIGS, key=["N", "K", "FMT", "ACT"],
+_grouped_tuned = triton.autotune(configs=_GROUPED_CONFIGS, key=["N", "K", "FMT", "ACT", "BM"],
                                  prune_configs_by={"early_config_prune": _prune_grouped})(_grouped_kernel)
 
 
@@ -384,18 +379,16 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     ends = torch.cumsum(sc.counts, 0, dtype=torch.int32)
     starts = ends - sc.counts
     row_src = order.to(torch.int32)
-    wts_sorted = wts.reshape(-1).float()[order].contiguous()
-    f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_sorted
-    f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_sorted
+    f13 = w13.expert_factor if w13.fmt == "nvfp4" else sc.counts
+    f2 = w2.expert_factor if w2.fmt == "nvfp4" else sc.counts
     act = sc.act[:p]
-    rs = sc.rows_sorted[:p]
+    wts_pair = wts.reshape(-1).float()
     _grouped_tuned[lambda m: (e, triton.cdiv(n13, m["BN"]))](
         x, x.stride(0), row_src, k, w13.weight, _scale_view(w13), f13, sc.tile_expert, starts, ends,
-        act, act.stride(0), wts_sorted, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=16,
+        act, act.stride(0), wts_pair, row_src, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, BM=16,
     )
     _grouped_tuned[lambda m: (e, triton.cdiv(hdim, m["BN"]))](
         act, act.stride(0), sc.ident, 1, w2.weight, _scale_view(w2), f2, sc.tile_expert, starts, ends,
-        rs, rs.stride(0), wts_sorted, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=16,
+        rows_out, rows_out.stride(0), wts_pair, row_src, hdim, n13 // 2, _fmt_id(w2), 0, gate_cap, up_cap, BM=16,
     )
-    rows_out[:p].index_copy_(0, order, rs)
     return rows_out[:p]

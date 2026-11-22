@@ -64,7 +64,7 @@ def test_prefill_matches_reference(layer, t):
     torch.manual_seed(t)
     x = (torch.randn(t, 2304, device="cuda") * 0.5).to(torch.bfloat16)
     wts, ids = ref.route(x, rw, rb, 8, 8.0)
-    out = moe_prefill(x, ids, wts, w13, w2, 4.0, 25.0)
+    out = moe_prefill(x, ids, wts, w13, w2, 4.0, 25.0).view(t, 8, -1).sum(1).to(torch.bfloat16)
     exp = ref.moe(x, wts, ids, w13, w2, 4.0, 25.0)
     err = rel_err(out, exp)
     print(w13.fmt, t, "prefill rel err", err)

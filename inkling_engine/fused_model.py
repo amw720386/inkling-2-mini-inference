@@ -78,6 +78,12 @@ class Workspace:
         self.taps = z(t, 4, h)  # DSpark features of each row (see FusedModel.tap_visits)
         self.part_acc = z(t, cfg.num_heads, n_split, cfg.head_dim, dt=f32) if n_split > 1 else None
         self.part_ml = z(t, cfg.num_heads, n_split, 2, dt=f32) if n_split > 1 else None
+        self._prefill_rows = None
+
+    def prefill_rows(self, n: int, h: int) -> torch.Tensor:
+        if self._prefill_rows is None or self._prefill_rows.shape[0] < n:
+            self._prefill_rows = torch.empty(n, h, dtype=torch.float32, device=self.blk.device)
+        return self._prefill_rows[:n]
 
 
 class FusedModel:
@@ -112,7 +118,7 @@ class FusedModel:
     # ---------------------------------------------------------------- metadata
     def step_meta(self, batch: Batch) -> StepMeta:
         max_new = max(s.n for s in batch.seqs)
-        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
+        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else (16 if max_new <= 256 else 32))  # one tile per verify step: KV read once
         n_tiles = sum((s.n + tok - 1) // tok for s in batch.seqs)
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)
@@ -245,7 +251,8 @@ class FusedModel:
                              norm_w=lw.mlp_norm[None], tmp=ws.tmp[:1, :T])
 
             # ---- MoE
-            fk.route(x, ex.router_bf16, lw.router_bias, ws.rlog, ws.ids[:T], ws.wts[:T], c.top_k, c.route_scale)
+            fk.route(x, ex.router_bf16, lw.router_bias, ws.rlog, ws.ids[:T], ws.wts[:T], c.top_k, c.route_scale,
+                     w_f32=lw.router_w)
             dst = blk[nb]
             if T <= DECODE_MOE_MAX_TOKENS and ws.rows is not None:
                 if T >= GROUPED_MIN_TOKENS and ws.grouped is not None:
@@ -258,8 +265,10 @@ class FusedModel:
                             c, decode_state=decode_state)
                 m = ws.m[:T]
             else:
-                m = moe_prefill(x, ws.ids[:T].long(), ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap)
-                fk.post_mlp(None, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
+                rows = moe_prefill(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
+                                   rows_out=ws.prefill_rows(T * c.top_k, c.hidden_size))
+                m = ws.m[:T]
+                fk.post_mlp(rows, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
                             decode_state=False)
             if not decode_state:
                 self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else conv_candidates(m, cache.mlp_conv[vi, vslot], cache.cand['mlp_conv'][vi])

@@ -33,7 +33,7 @@ class StepMeta:
 
 def build_step_meta(batch: Batch, n_split_local: int, n_split_global: int, device="cuda") -> StepMeta:
     max_new = max(s.n for s in batch.seqs)
-    tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
+    tok = 4 if max_new <= 4 else (8 if max_new <= 8 else (16 if max_new <= 256 else 32))  # one tile per verify step: KV read once
     loc = AttnMeta.build(batch.seqs, batch.offsets, tok, n_split_local, device)
     glob = AttnMeta(loc.seq_slot, loc.seq_start, loc.seq_off, loc.seq_n, loc.tile_seq, loc.tile_q0, loc.n_tiles,
                     tok, n_split_global, loc.max_keys)
@@ -66,7 +66,7 @@ class FastBackend(RefBackend):
         if self.static_meta:
             return
         max_new = max(s.n for s in batch.seqs)
-        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else 16)  # one tile per verify step: KV read once
+        tok = 4 if max_new <= 4 else (8 if max_new <= 8 else (16 if max_new <= 256 else 32))  # one tile per verify step: KV read once
         n_tiles = sum((s.n + tok - 1) // tok for s in batch.seqs)
         max_keys = max(s.start + s.n for s in batch.seqs)
         nl, ng = pick_splits(max_keys, n_tiles, self.cfg.num_kv_heads, self.sms, self.cfg.sliding_window)
@@ -101,6 +101,7 @@ class FastBackend(RefBackend):
         if x.shape[0] <= DECODE_MOE_MAX_TOKENS:
             rows = moe_decode(x, idx, wts, lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap)
             return rows.view(x.shape[0], c.top_k, -1).sum(1).to(torch.bfloat16)
-        return moe_prefill(x, idx, wts, lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap)
+        rows = moe_prefill(x, idx, wts, lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap)
+        return rows.view(x.shape[0], c.top_k, -1).sum(1).to(torch.bfloat16)
 
     fused_gate = True  # attention() applies sigmoid(gate)

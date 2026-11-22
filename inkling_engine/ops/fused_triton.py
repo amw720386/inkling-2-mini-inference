@@ -343,9 +343,34 @@ def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
 _ROUTER_COUNTERS: dict = {}
 
 
-def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale):
+@triton.jit
+def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.constexpr, scale):
+    t = tl.program_id(0).to(tl.int64)
+    ea = tl.arange(0, E)
+    sg = tl.sigmoid(tl.load(Logits + t * l_stride + ea))
+    sel = sg + tl.load(Bias + ea)
+    ks = tl.arange(0, TOPK)
+    ids = tl.zeros((TOPK,), tl.int32)
+    ws = tl.zeros((TOPK,), tl.float32)
+    for j in tl.static_range(TOPK):
+        mx = tl.max(sel, 0)
+        idx = tl.min(tl.where(sel == mx, ea, E), 0)
+        wj = tl.sum(tl.where(ea == idx, sg, 0.0), 0)
+        ids = tl.where(ks == j, idx, ids)
+        ws = tl.where(ks == j, wj, ws)
+        sel = tl.where(ea == idx, float("-inf"), sel)
+    ws = ws / (tl.sum(ws, 0) + 1e-20) * scale
+    tl.store(Ids + t * TOPK + ks, ids)
+    tl.store(Wts + t * TOPK + ks, ws)
+
+
+def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale, w_f32=None):
     t, h = x.shape
     e = w_bf16.shape[0]
+    if t >= PREFILL_GEMM_MIN_TOKENS and w_f32 is not None:
+        logits = x.float() @ w_f32.t()
+        _topk_kernel[(t,)](logits, logits.stride(0), bias, ids, wts, E=e, TOPK=top_k, scale=scale, num_warps=4)
+        return
     key = (x.device.index, logits_buf.data_ptr())
     cnt = _ROUTER_COUNTERS.get(key)
     if cnt is None or cnt.numel() < logits_buf.shape[0]:
@@ -485,11 +510,34 @@ def _msg_norm_kernel(Tmp, tmp_stride_g, tmp_stride_t, SS, Wn, wn_stride, Out, ou
     tl.store(Out + j * out_stride_g + t * out_stride_t + h, o.to(tl.bfloat16), mask=hm)
 
 
+PREFILL_GEMM_MIN_TOKENS = 64  # above this, the per-token kernels re-read their weights too often
+
+
+def _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w):
+    """Same math as the per-token kernels, as GEMMs (prefill)."""
+    eps = cfg.rms_eps
+    for j in range(n_gate):
+        h, m = hs[j], ms[j]
+        xn = (h * torch.rsqrt(h.square().mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
+        mn = (m * torch.rsqrt(m.square().mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
+        g = (torch.cat([xn, mn], -1) @ lw.ctl_down[gate0 + j].t()).float()
+        f = torch.tanh(g @ lw.ctl_forget[gate0 + j].float().t())
+        ga = torch.tanh(g @ lw.ctl_gain[gate0 + j].float().t())
+        o = (1.0 - f) * h + ga * m
+        if norm_w is not None:
+            o = o * torch.rsqrt(o.square().mean(-1, keepdim=True) + eps) * norm_w[j].float()
+            out[j].copy_(o.to(torch.bfloat16))
+        else:
+            out[j].copy_(o)
+
+
 def msg_gates(hs, ms, lw, gate0: int, n_gate: int, g_buf, out, cfg, *, norm_w=None, tmp=None):
     """hs/ms: [n_gate, T, H] fp32 views (gate stride may be 0 to broadcast).
     out: [n_gate, T, H] bf16 (normed with norm_w [n_gate, H]; needs fp32 `tmp` with out's
     strides) or fp32 (no norm)."""
     _, t, h = hs.shape
+    if t >= PREFILL_GEMM_MIN_TOKENS:
+        return _msg_gates_gemm(hs, ms, lw, gate0, n_gate, out, cfg, norm_w)
     rank = cfg.gate_rank
     _msg_down_kernel[(t, n_gate, rank // 4)](
         hs, hs.stride(0), hs.stride(1), ms, ms.stride(0), ms.stride(1), lw.ctl_down, g_buf, cfg.rms_eps,
