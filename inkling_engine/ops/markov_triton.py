@@ -57,8 +57,10 @@ def _cell_kernel(step, Wstep, Rest, Bias, W1, Anchor, Tokens, State, Latent,
 
 
 @triton.jit
-def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, Counter, Tokens, Conf,
+def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, Counter, Tokens, Conf, Temp, Seed,
                    K: tl.constexpr, R: tl.constexpr, BC: tl.constexpr, NPROG: tl.constexpr):
+    """Pick = argmax(logit) when Temp <= 0, else argmax(logit / T + Gumbel noise) (a sample from
+    softmax(logit / T) over the candidates). Conf is the max softmax probability of the plain logits."""
     pid = tl.program_id(0)
     c = pid * BC + tl.arange(0, BC)
     k = tl.arange(0, R)
@@ -70,20 +72,27 @@ def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, 
     z = (tl.load(CandBase + step * K + c) + bias).to(tl.bfloat16).to(tl.float32)
     lg = (30.0 * _tanh(z / 30.0)).to(tl.bfloat16).to(tl.float32)
     tl.store(Logits + step * K + c, lg)
+    temp = tl.load(Temp)
+    u = tl.minimum(tl.maximum(tl.rand(tl.load(Seed), step * K + c), 1e-20), 1.0 - 1e-7)
+    score = tl.where(temp > 0, lg / tl.maximum(temp, 1e-6) - tl.log(-tl.log(u)), lg)
+    sm = tl.max(score, 0)
+    sa = tl.min(tl.where(score == sm, c, K), 0)
     m = tl.max(lg, 0)
-    am = tl.min(tl.where(lg == m, c, K), 0)
     se = tl.sum(tl.exp(lg - m), 0)
-    tl.store(Part + pid * 3, m)
-    tl.store(Part + pid * 3 + 1, am.to(tl.float32))
-    tl.store(Part + pid * 3 + 2, se)
+    tl.store(Part + pid * 4, sm)
+    tl.store(Part + pid * 4 + 1, sa.to(tl.float32))
+    tl.store(Part + pid * 4 + 2, m)
+    tl.store(Part + pid * 4 + 3, se)
     done = tl.atomic_add(Counter, 1, sem="acq_rel")
     if done == NPROG - 1:
         p = tl.arange(0, NPROG)
-        pm = tl.load(Part + p * 3, volatile=True)
-        pa = tl.load(Part + p * 3 + 1, volatile=True)
-        ps = tl.load(Part + p * 3 + 2, volatile=True)
+        psm = tl.load(Part + p * 4, volatile=True)
+        psa = tl.load(Part + p * 4 + 1, volatile=True)
+        pm = tl.load(Part + p * 4 + 2, volatile=True)
+        ps = tl.load(Part + p * 4 + 3, volatile=True)
+        gs = tl.max(psm, 0)
+        best = tl.min(tl.where(psm == gs, psa, K * 1.0), 0).to(tl.int32)  # lowest index among ties
         gm = tl.max(pm, 0)
-        best = tl.min(tl.where(pm == gm, pa, K * 1.0), 0).to(tl.int32)  # lowest index among ties
         tot = tl.sum(ps * tl.exp(pm - gm), 0)
         tl.store(Tokens + step, tl.load(CandIdx + step * K + best))
         tl.store(Conf + step, 1.0 / tot)
@@ -100,10 +109,10 @@ class MarkovHead:
         self.logits = torch.zeros(gamma, k, dtype=torch.float32, device=device)
         self.bc = 64
         self.nprog = k // self.bc
-        self.part = torch.zeros(self.nprog * 3, dtype=torch.float32, device=device)
+        self.part = torch.zeros(self.nprog * 4, dtype=torch.float32, device=device)
         self.counter = torch.zeros(1, dtype=torch.int32, device=device)
 
-    def run(self, rest, cand_base, cand_idx, w_step, bias, w1, anchor, fold_w, fold_b, tokens, conf):
+    def run(self, rest, cand_base, cand_idx, w_step, bias, w1, anchor, fold_w, fold_b, tokens, conf, temp, seed):
         """rest fp32 [G, 3R]; cand_base fp32 [G, K]; cand_idx int32/int64 [G, K]; tokens int64 [G]; conf fp32 [G]."""
         r, kk = self.rank, self.k
         self.state[0].zero_()
@@ -111,5 +120,6 @@ class MarkovHead:
             _cell_kernel[(r // 32,)](i, w_step, rest, bias, w1, anchor, tokens, self.state, self.latent,
                                      R=r, BI=32, num_warps=4)
             _logits_kernel[(self.nprog,)](i, cand_base, cand_idx, fold_w, fold_b, self.latent, self.logits, self.part,
-                                          self.counter, tokens, conf, K=kk, R=r, BC=self.bc, NPROG=self.nprog,
+                                          self.counter, tokens, conf, temp, seed, K=kk, R=r, BC=self.bc,
+                                          NPROG=self.nprog,
                                           num_warps=4)

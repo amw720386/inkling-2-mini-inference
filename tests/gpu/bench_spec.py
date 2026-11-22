@@ -56,3 +56,19 @@ spec, ss = eng.generate(long_ids, 256, stop, spec=True)
 print(f"8k prompt: prefill {8000 / sp.prefill_s:.0f} tok/s | plain {sp.decode_tok_s:.1f} tok/s | "
       f"spec {ss.decode_tok_s:.1f} tok/s (accept len {(ss.accepted + ss.rounds) / max(ss.rounds, 1):.2f})")
 print(f"peak allocated {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")
+
+# sampled decoding (temperature 1, the model's default): plain vs DSpark rejection sampling
+from inkling_engine.sampling import Sampling  # noqa: E402
+
+tot = {"plain": [0, 0.0], "spec": [0, 0.0]}
+acc_r = [0, 0]
+for i, it in enumerate(items[:6]):
+    for k, use in (("plain", False), ("spec", True)):
+        _, s = eng.generate(it["input_ids"], n_new, stop, spec=use, sampling=Sampling(temperature=1.0, seed=100 + i))
+        tot[k][0] += s.generated
+        tot[k][1] += s.decode_s
+        if use:
+            acc_r[0] += s.accepted
+            acc_r[1] += s.rounds
+print(f"temperature 1.0: plain {tot['plain'][0] / tot['plain'][1]:.1f} tok/s | DSpark {tot['spec'][0] / tot['spec'][1]:.1f} "
+      f"tok/s (accept len {(acc_r[0] + acc_r[1]) / max(acc_r[1], 1):.2f})")

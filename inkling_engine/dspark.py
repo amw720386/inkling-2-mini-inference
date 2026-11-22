@@ -126,6 +126,9 @@ class Drafter:
         self.commit_feats = torch.zeros(BLOCK, 4, D, **kv)
         self.commit_start = torch.zeros(1, dtype=torch.long, device=device)
         self.commit_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.temperature = torch.zeros(1, device=device)  # <= 0: greedy drafts, else Gumbel-max at T
+        self.seed = torch.zeros(1, dtype=torch.int32, device=device)  # advanced every draft (in-graph)
+        self.cand_buf = torch.zeros(GAMMA, CANDIDATES, dtype=torch.int64, device=device)
         self.fused_head = True  # Triton Markov head (2 launches per step); False: the torch reference loop
         self.head_kernels = MarkovHead(GAMMA, RANK, CANDIDATES, device)
 
@@ -215,9 +218,11 @@ class Drafter:
         cand_base, cand = base.topk(CANDIDATES, dim=-1)
         rest = torch.cat([h, self.f_rnn[None].expand(GAMMA, -1)], dim=1).float() @ self.rnn_w_rest  # [7, 768]
         if self.fused_head:
-            self.head_kernels.run(rest.contiguous(), cand_base.contiguous(), cand.contiguous(), self.rnn_w_step,
+            self.cand_buf.copy_(cand)
+            self.head_kernels.run(rest.contiguous(), cand_base.contiguous(), self.cand_buf, self.rnn_w_step,
                                   self.rnn_b, self.w1, self.anchor, self.fold_w, self.fold_b, self.draft_tokens,
-                                  self.conf)
+                                  self.conf, self.temperature, self.seed)
+            self.seed.add_(1)
             return self.draft_tokens, self.conf
         cand_w, cand_b = self.fold_w[cand], self.fold_b[cand]
         state = torch.zeros(RANK, dtype=torch.bfloat16, device=dev)
@@ -274,9 +279,14 @@ class Drafter:
             self.commit_graphs[n] = g
         self.reset()
 
-    def draft(self, anchor: int, P: int):
+    def draft_distribution(self, n: int, temperature: float):
+        """(candidate ids [n, K], q over them [n, K]) of the last draft's first n steps at `temperature`."""
+        return self.cand_buf[:n], torch.softmax(self.head_kernels.logits[:n] / temperature, -1)
+
+    def draft(self, anchor: int, P: int, temperature: float = 0.0):
         self.anchor.fill_(anchor)
         self.P.fill_(P)
+        self.temperature.fill_(temperature)
         if not self.graphs:
             return self._draft()
         self.graphs[next((b for b in self.graphs if b >= P + BLOCK), self.ctx)].replay()

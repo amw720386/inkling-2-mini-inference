@@ -20,17 +20,10 @@ from .cache import CacheSpec, InklingCache
 from .config import InklingConfig
 from .fast import build_step_meta
 from .fused_model import FusedDecodeGraph, FusedModel
+from .sampling import Sampling, accept_sampled, probs, sample
 from .weights import load_weights
 
 VERIFY_WIDTHS = (2, 4, 8)
-
-
-@dataclass
-class Sampling:
-    temperature: float = 0.0
-    top_p: float = 1.0
-    top_k: int = 0
-    seed: int | None = None
 
 
 @dataclass
@@ -226,28 +219,16 @@ class Engine:
         return logits[-1], start
 
     # ----------------------------------------------------------------- generate
-    @staticmethod
-    def _probs(logits: torch.Tensor, sp: "Sampling") -> torch.Tensor:
-        logits = logits.float() / max(sp.temperature, 1e-5)
-        if sp.top_k > 0:
-            kth = torch.topk(logits, min(sp.top_k, logits.shape[-1]), dim=-1).values[..., -1:]
-            logits = logits.masked_fill(logits < kth, float("-inf"))
-        probs = torch.softmax(logits, -1)
-        if sp.top_p < 1.0:
-            sp_, order = probs.sort(dim=-1, descending=True)
-            cut = torch.cumsum(sp_, -1) - sp_ > sp.top_p
-            probs = torch.zeros_like(probs).scatter_(-1, order, sp_.masked_fill(cut, 0.0))
-        return probs
+    _probs = staticmethod(probs)
 
-    def _sample(self, logits, sp: "Sampling", gen) -> int:
-        if sp.temperature <= 0:
-            return int(logits.argmax())
-        return int(torch.multinomial(self._probs(logits, sp), 1, generator=gen))
+    def _sample(self, logits, sp: Sampling, gen) -> int:
+        return sample(logits, sp, gen)
 
     @torch.inference_mode()
     def stream(self, ids: list[int], max_new: int, stop_ids=(), sampling: "Sampling | None" = None,
                spec: bool | None = None, stats: "GenStats | None" = None):
-        """Yield generated token ids. Greedy requests use DSpark when enabled; sampled ones decode plainly."""
+        """Yield generated token ids, with DSpark speculation when enabled (greedy: longest matching prefix;
+        sampled: rejection sampling, exact for the target distribution)."""
         sp = sampling or Sampling()
         st = stats if stats is not None else GenStats()
         st.prompt_tokens = len(ids)
@@ -259,6 +240,8 @@ class Engine:
         if sp.seed is not None:
             gen = torch.Generator(device="cuda")
             gen.manual_seed(sp.seed)
+            if self.drafter is not None:  # the drafter's Gumbel noise too, so a seeded request reproduces
+                self.drafter.seed.fill_(sp.seed & 0x7FFFFFFF)
         torch.cuda.synchronize()
         t0 = time.time()
         logits, st.reused_tokens = self.prefill(ids)
@@ -268,7 +251,7 @@ class Engine:
         t0 = time.time()
         out = [tok]
         P = len(ids)  # position of the anchor (sampled, not yet processed)
-        use_spec = (self.spec if spec is None else (spec and self.spec)) and sp.temperature <= 0
+        use_spec = self.spec if spec is None else (spec and self.spec)
         try:
             yield tok
             while len(out) < max_new and out[-1] not in stop:
@@ -281,7 +264,7 @@ class Engine:
                     out.append(t)
                     yield t
                     continue
-                drafts, conf = self.drafter.draft(out[-1], P)
+                drafts, conf = self.drafter.draft(out[-1], P, max(sp.temperature, 0.0))
                 info = torch.cat([conf, drafts.float()]).tolist()  # one sync
                 confs, drafted = info[:7], [int(d) for d in info[7:]]
                 m = self._pick_width(confs)
@@ -289,9 +272,13 @@ class Engine:
                 vt[0] = out[-1]
                 vt[1:].copy_(drafts[:m - 1])
                 logits, taps = self.verify[m].run(vt, P)
-                target = logits.argmax(-1)
-                acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
-                acc, *tgt = torch.cat([acc_t, target.int()]).tolist()  # one sync
+                if sp.temperature <= 0:
+                    target = logits.argmax(-1)
+                    acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
+                    acc, *tgt = torch.cat([acc_t, target.int()]).tolist()  # one sync
+                else:
+                    acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
+                    tgt = [0] * acc + [nxt]
                 commit = acc + 1
                 self._observe(confs, m, acc)
                 self.cache.commit_spec(0, commit)
@@ -311,6 +298,10 @@ class Engine:
             torch.cuda.synchronize()
             st.decode_s = time.time() - t0
             st.generated = len(out)
+
+    def _accept_sampled(self, drafts, target_logits, sp, gen):
+        cand, q = self.drafter.draft_distribution(drafts.shape[0], sp.temperature)
+        return accept_sampled(drafts, target_logits, cand, q, sp, gen)
 
     def generate(self, ids: list[int], max_new: int, stop_ids=(), spec: bool | None = None,
                  sampling: "Sampling | None" = None) -> tuple[list[int], GenStats]:

@@ -15,6 +15,9 @@ torch 2.9.1+cu128, Triton 3.5.1).
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
 
+Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded): plain 149.7 tok/s, DSpark with
+speculative rejection sampling 195.1 tok/s (acceptance length 2.17).
+
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
 
 ## Long context (`tests/gpu/longctx.py`, `kv_fp8`)
