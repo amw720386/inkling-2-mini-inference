@@ -24,7 +24,7 @@ from transformers import AutoTokenizer  # noqa: E402
 import uvicorn  # noqa: E402
 
 tok = AutoTokenizer.from_pretrained(path)
-eng = Engine(path, max_ctx=32768, spec=True, vision=True)
+eng = Engine(path, max_ctx=32768, spec=True, vision=True, slots=2)
 server = Server(eng, tok, "inkling-2-mini")
 app = build_app(server)
 cfg = uvicorn.Config(app, host="127.0.0.1", port=8011, log_level="warning")
@@ -216,5 +216,32 @@ except ValueError:
     ok = False
 bad = requests.post(B + "/completions", json={"prompt": "x", "response_format": {"type": "yaml"}})
 ok &= bad.status_code == 400
+# prefix reuse in every slot: two conversations run their turns concurrently; each second turn reuses its
+# own slot's history and keeps the conversation's facts
+convs = {"name": ("My name is Alice. Just say OK.", "What is my name? One word.", "alice"),
+         "color": ("My favorite color is green. Just say OK.", "What is my favorite color? One word.", "green")}
+hist = {k: [{"role": "user", "content": v[0]}] for k, v in convs.items()}
+res = {}
+
+
+def turn(k):
+    r = requests.post(B + "/chat/completions", json={"messages": hist[k], "max_tokens": 200, "temperature": 0,
+                                                     "reasoning_effort": "low"}).json()
+    res[k] = r
+
+
+for step in (0, 1):
+    th = [threading.Thread(target=turn, args=(k,)) for k in convs]
+    [x.start() for x in th]
+    [x.join() for x in th]
+    for k, v in convs.items():
+        hist[k] = hist[k] + [{"role": "assistant", "content": res[k]["choices"][0]["message"]["content"]}]
+        if step == 0:
+            hist[k].append({"role": "user", "content": v[1]})
+for k, v in convs.items():
+    ans = res[k]["choices"][0]["message"]["content"]
+    cached = res[k]["usage"]["prompt_tokens_details"]["cached_tokens"]
+    print(f"multi-slot reuse [{k}]: {ans!r} cached {cached}")
+    ok &= v[2] in ans.lower() and cached > 0
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

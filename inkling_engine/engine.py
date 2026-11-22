@@ -138,15 +138,23 @@ class Engine:
         self.draft_cost, self.verify_costs, self.decode_costs = 1.0, {}, {}
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
-        self.state_ids: list[int] = []  # tokens whose positions the cache holds
-        self.snap = None  # state at the end of the last prompt (see _snapshot)
+        self.slot_ids: list[list[int]] = [[] for _ in range(slots)]  # tokens whose positions each slot holds
+        self.snaps: list = [None] * slots  # per slot: state at the end of its last prompt (see _snapshot)
         # compile and autotune the prefill kernels (first and later chunks) now, not in the first long request
         warm = min(2 * prefill_chunk + 100, max_ctx - 16)
         self.prefill(list(range(1000, 1000 + warm)))
         self.cache.reset_slot(0)
-        self.state_ids, self.snap = [], None
+        self.slot_ids[0], self.snaps[0] = [], None
         if self.drafter is not None:
             self.drafter.reset()
+
+    @property
+    def state_ids(self) -> list[int]:  # slot 0 (single-stream API)
+        return self.slot_ids[0]
+
+    @state_ids.setter
+    def state_ids(self, ids: list[int]):
+        self.slot_ids[0] = ids
 
     def _calibrate(self) -> dict[int, float]:
         """Measured ms of a round per verify width (draft + verify), for the width policy."""
@@ -214,36 +222,48 @@ class Engine:
         return _drain(self.prefill_steps(slot, ids, image_feats))[0]
 
     # ----------------------------------------------------------- prefix reuse
-    def _snapshot(self, ids: list[int]):
-        """State at the end of a prompt: conv states, sliding rings and the drafter's rings. Global KV is
+    def _snap_state(self, slot: int) -> list[torch.Tensor]:
+        """The slot's state a snapshot keeps: conv states, sliding rings and the drafter's rings. Global KV is
         position-indexed, so positions < len(ids) stay valid without a copy."""
         c = self.cache
-        snap = {"ids": list(ids),
-                "conv": [t[:, 0].clone() for t in (c.k_conv, c.v_conv, c.attn_conv, c.mlp_conv)],
-                "ring": (c.local_k[:, 0].clone(), c.local_v[:, 0].clone())}
+        state = [t[:, slot] for t in (c.k_conv, c.v_conv, c.attn_conv, c.mlp_conv, c.local_k, c.local_v)]
         if self.drafter is not None:
             d = self.drafter
-            d._use(0)
-            snap["draft"] = ({l: (d.k_ctx[l].clone(), d.v_ctx[l].clone()) for l in (0, 2)},
-                             {l: d.ctx_pos[l].clone() for l in (0, 2)}, d.f_rnn.clone(), d.length)
-        self.snap = snap
+            d._use(slot)
+            state += [d.k_ctx[l] for l in (0, 2)] + [d.v_ctx[l] for l in (0, 2)] + [d.ctx_pos[l] for l in (0, 2)]
+            state.append(d.f_rnn)
+        return state
 
-    def _restore(self):
-        c, snap = self.cache, self.snap
-        for t, v in zip((c.k_conv, c.v_conv, c.attn_conv, c.mlp_conv), snap["conv"]):
-            t[:, 0].copy_(v)
-        c.local_k[:, 0].copy_(snap["ring"][0])
-        c.local_v[:, 0].copy_(snap["ring"][1])
+    def _snapshot(self, ids: list[int], slot: int = 0):
+        """Copy the slot's state at the end of a prompt (buffers allocated on the slot's first snapshot)."""
+        state = self._snap_state(slot)
+        old = self.snaps[slot]
+        bufs = old["bufs"] if old is not None else [torch.empty_like(t) for t in state]
+        for b, t in zip(bufs, state):
+            b.copy_(t)
+        self.snaps[slot] = {"ids": list(ids), "bufs": bufs,
+                            "draft_len": self.drafter.lengths[slot] if self.drafter is not None else 0}
+
+    def _restore(self, slot: int = 0):
+        snap = self.snaps[slot]
+        for t, b in zip(self._snap_state(slot), snap["bufs"]):
+            t.copy_(b)
         if self.drafter is not None:
-            kv, pos, f, length = snap["draft"]
-            d = self.drafter
-            d._use(0)
-            for l in (0, 2):
-                d.k_ctx[l].copy_(kv[l][0])
-                d.v_ctx[l].copy_(kv[l][1])
-                d.ctx_pos[l].copy_(pos[l])
-            d.f_rnn.copy_(f)
-            d.length = length
+            self.drafter.lengths[slot] = snap["draft_len"]
+
+    def reusable(self, slot: int, ids: list[int]) -> int:
+        """Prompt tokens of `ids` that `slot` can reuse: everything it processed so far when `ids` extends that,
+        else its last prompt (snapshot) when `ids` extends that prompt; 0 for prompts with images."""
+        if IMAGE_TOKEN_ID in ids:  # placeholder ids do not identify the image
+            return 0
+        prev = self.slot_ids[slot]
+        if 0 < len(prev) < len(ids) and ids[:len(prev)] == prev and (
+                self.drafter is None or self.drafter.lengths[slot] == len(prev)):
+            return len(prev)
+        snap = self.snaps[slot]
+        if snap is not None and 0 < len(snap["ids"]) < len(ids) and ids[:len(snap["ids"])] == snap["ids"]:
+            return len(snap["ids"])
+        return 0
 
     def prefill(self, ids: list[int], image_feats=None) -> tuple[torch.Tensor, int]:
         """Bring slot 0 to `ids`; see prefill_steps. Returns (last logits, reused tokens)."""
@@ -252,22 +272,23 @@ class Engine:
     @torch.inference_mode()
     def prefill_steps(self, slot: int, ids: list[int], image_feats=None):
         """Generator: prefill `ids` into `slot` one chunk per step (yields between chunks so a scheduler can
-        interleave decode steps); returns (last logits, reused tokens). Slot 0 reuses (a) everything processed
-        so far when `ids` extends it, or (b) the previous prompt's snapshot when `ids` extends that prompt (a
-        chat turn whose template re-renders the earlier answer); other slots start fresh."""
+        interleave decode steps); returns (last logits, reused tokens). The slot reuses (a) everything it processed
+        so far when `ids` extends it, or (b) its previous prompt's snapshot when `ids` extends that prompt (a chat
+        turn whose template re-renders the earlier answer); see `reusable`."""
         start = 0
         img_pos = [i for i, t in enumerate(ids) if t == IMAGE_TOKEN_ID]
         if img_pos and (image_feats is None or image_feats.shape[0] != len(img_pos)):
             raise ValueError(f"{len(img_pos)} image placeholder tokens but "
                              f"{0 if image_feats is None else image_feats.shape[0]} image features")
-        if slot == 0 and not img_pos:  # placeholder ids do not identify the image: never reuse those
-            prev = self.state_ids
-            drafter_ok = lambda n: self.drafter is None or self.drafter.length == n  # noqa: E731
-            if 0 < len(prev) < len(ids) and ids[:len(prev)] == prev and drafter_ok(len(prev)):
-                start = len(prev)
-            elif self.snap is not None and 0 < len(self.snap["ids"]) < len(ids) and ids[:len(self.snap["ids"])] == self.snap["ids"]:
-                self._restore()
-                start = len(self.snap["ids"])
+        start = self.reusable(slot, ids)
+        prev = self.slot_ids[slot]
+        extends_prev = start > 0 and start == len(prev) and ids[:start] == prev
+        if start and not extends_prev:  # resume from the snapshot of the slot's last prompt
+            self._restore(slot)
+        # the slot's cache changes from here on: nothing in it is reusable until this prompt completes
+        self.slot_ids[slot] = []
+        if start == 0 and self.snaps[slot] is not None:
+            self.snaps[slot]["ids"] = []
         if start == 0:
             self.cache.reset_slot(slot)
             if self.drafter is not None:
@@ -287,9 +308,8 @@ class Engine:
                 self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
             if s + self.prefill_chunk < len(ids):
                 yield
-        if slot == 0:
-            self.state_ids = list(ids)
-            self._snapshot(ids)
+        self.slot_ids[slot] = list(ids)
+        self._snapshot(ids, slot)
         return logits[-1].clone(), start
 
     # ----------------------------------------------------------------- generate

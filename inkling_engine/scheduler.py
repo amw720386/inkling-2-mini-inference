@@ -138,8 +138,10 @@ class Scheduler:
             if not free:
                 return
             req = self.waiting.pop(0)
+            # the free slot holding the longest reusable prefix of this prompt (a chat's earlier turns)
+            slot = max(free, key=lambda s: (self.e.reusable(s, req.ids), s == 0))
             try:
-                self._begin(req, 0 if 0 in free else free[0])
+                self._begin(req, slot)
             except Exception as exc:
                 self._fail(req, exc)
 
@@ -218,8 +220,8 @@ class Scheduler:
         st = req.stats
         st.generated = len(req.out)
         st.decode_s = time.time() - req.t_decode if req.t_decode else 0.0
-        if req.slot == 0:
-            self.e.state_ids = (req.ids + req.out)[:req.P]
+        if req.slot >= 0:
+            self.e.slot_ids[req.slot] = (req.ids + req.out)[:req.P]
         self.active.pop(req.slot, None)
         req.on_token(None)
         req.done.set()

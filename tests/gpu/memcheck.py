@@ -16,6 +16,8 @@ for kw in (dict(max_ctx=32768, slots=4, vision=True), dict(max_ctx=262144, slots
     a, pk = torch.cuda.memory_allocated() / G, torch.cuda.max_memory_allocated() / G
     n = min(kw["max_ctx"] - 64, 30000)
     eng.prefill(list(range(1000, 1000 + n)))
+    for slot in range(1, kw["slots"]):  # every slot holds a prompt snapshot (prefix reuse)
+        eng.prefill_slot(slot, list(range(2000, 2000 + 4000)))
     print(f"{kw}: after start {a:.2f} GiB (peak {pk:.2f}); after a {n}-token prefill peak "
           f"{torch.cuda.max_memory_allocated() / G:.2f} GiB, reserved {torch.cuda.memory_reserved() / G:.2f} GiB")
     del eng
