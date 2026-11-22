@@ -84,7 +84,16 @@ uses a counting sort (histogram, tile plan and scatter kernels, no host sync) in
 message gates run as a norm/concat kernel, one cuBLAS GEMM and tiled up-projection/norm kernels instead of ~15
 eager fp32 ops per gate; the prefill router GEMM runs on the TF32 tensor cores with 3xTF32 products (max error
 1.6e-6 vs 1.2e-6 for cuBLAS fp32 on unit-scale logits, identical top-8 sets in `tests/gpu/test_glue.py`).
-GSM8K after these changes (bf16): 0.830. The bf16 path pays the GeForce half-rate bf16 MMA; the FP4 path does not, so its
+GSM8K after these changes (bf16): 0.830.
+
+Prefill attention (`tests/gpu/bench_attn.py`, last 2048-token chunk of an 8k prompt): the per-token relative-bias
+table lookup (one bf16 gather per query/key pair) cost about half of the kernel. Issuing that load before the QK
+MMA lets its latency overlap the dot: local layer 417 -> 338 us, global 2199 -> 1769 us (without the bias at all:
+215 / 1398 us). Head-major tiles (no padded GQA rows) and branching on cache-only / chunk-only key blocks were
+tried and dropped (no gain; the branches hurt software pipelining). Computing the bias inside the kernel from
+the 16-dim relative states (a small MMA against the layer's [16, R] projection per key block, then a per-row shifted
+`tl.gather`) is exact to 3e-5 but slower than the table (local 362 vs 333 us, global 2447 vs 1723 us), so the table
+stays. 8k engine prefill, bf16: 23.7k tok/s. The bf16 path pays the GeForce half-rate bf16 MMA; the FP4 path does not, so its
 gain on an RTX 5090 should be larger than on this proxy.
 
 Numerics (`tests/gpu/fp4_e2e.py`, 3072 tokens of natural text, all logits): bf16 with 1024- vs 512-token chunks
