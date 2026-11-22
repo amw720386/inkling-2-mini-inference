@@ -63,7 +63,7 @@ def rope(x, positions):
 
 
 class Drafter:
-    def __init__(self, model_dir: str | Path, target: ModelWeights, max_ctx: int, device="cuda"):
+    def __init__(self, model_dir: str | Path, target: ModelWeights, max_ctx: int, device="cuda", slots: int = 1):
         with safe_open(str(Path(model_dir) / "mtp.safetensors"), framework="pt", device=device) as f:
             t = {k: f.get_tensor(k) for k in f.keys()}
         self.alpha = bf(torch.softmax(t["fuse_weight"].float(), -1))  # [4 layers/rnn, 4 taps]
@@ -111,12 +111,17 @@ class Drafter:
         self.draft_logits = torch.full((GAMMA, V), float("-inf"), device=device)
         self.ctx = min(max_ctx, DRAFT_CTX)
         kv = dict(dtype=torch.bfloat16, device=device)
-        self.k_ctx = {l: torch.zeros((WINDOW + BLOCK) if l in LOCAL else self.ctx, KV_HEADS, HEAD_DIM, **kv)
-                      for l in range(3)}
-        self.v_ctx = {l: torch.zeros_like(self.k_ctx[l]) for l in range(3)}
-        self.ctx_pos = {l: torch.full((WINDOW,), -1, dtype=torch.long, device=device) for l in LOCAL}
-        self.f_rnn = torch.zeros(D, **kv)
-        self.length = 0
+        # one draft context per engine slot (a request decoding alone in any slot can speculate)
+        self.slots = slots
+        self.ctxs = []
+        for _ in range(slots):
+            k_ctx = {l: torch.zeros((WINDOW + BLOCK) if l in LOCAL else self.ctx, KV_HEADS, HEAD_DIM, **kv)
+                     for l in range(3)}
+            self.ctxs.append({"k": k_ctx, "v": {l: torch.zeros_like(k_ctx[l]) for l in range(3)},
+                              "pos": {l: torch.full((WINDOW,), -1, dtype=torch.long, device=device) for l in LOCAL},
+                              "f": torch.zeros(D, **kv)})
+        self.lengths = [0] * slots
+        self._use(0)
         self.anchor = torch.zeros(1, dtype=torch.long, device=device)
         self.P = torch.zeros(1, dtype=torch.long, device=device)
         self.draft_tokens = torch.zeros(GAMMA, dtype=torch.long, device=device)
@@ -132,23 +137,39 @@ class Drafter:
         self.fused_head = True  # Triton Markov head (2 launches per step); False: the torch reference loop
         self.head_kernels = MarkovHead(GAMMA, RANK, CANDIDATES, device)
 
-    def reset(self):
-        for l in LOCAL:
-            self.ctx_pos[l].fill_(-1)
-        self.length = 0
+    def _use(self, slot: int):
+        """Point the commit/draft code (and graphs captured now) at `slot`'s context buffers."""
+        c = self.ctxs[slot]
+        self.cur = slot
+        self.k_ctx, self.v_ctx, self.ctx_pos, self.f_rnn = c["k"], c["v"], c["pos"], c["f"]
+
+    @property
+    def length(self) -> int:  # slot 0 (prefix reuse lives there)
+        return self.lengths[0]
+
+    @length.setter
+    def length(self, n: int):
+        self.lengths[0] = n
+
+    def reset(self, slot: int | None = None):
+        for s_ in (range(self.slots) if slot is None else (slot,)):
+            for l in LOCAL:
+                self.ctxs[s_]["pos"][l].fill_(-1)
+            self.lengths[s_] = 0
 
     # ------------------------------------------------------------------ commit
     @torch.inference_mode()
-    def commit(self, feats: torch.Tensor, start: int):
-        """Target rows (feats [n, 4, H] at positions start..start+n-1) become draft context."""
+    def commit(self, feats: torch.Tensor, start: int, slot: int = 0):
+        """Target rows (feats [n, 4, H] at positions start..start+n-1) become `slot`'s draft context."""
         n = feats.shape[0]
-        if n in self.commit_graphs:
+        self._use(slot)
+        if (n, slot) in self.commit_graphs:
             self.commit_feats[:n].copy_(feats)
             self.commit_start.fill_(start)
-            self.commit_graphs[n].replay()
+            self.commit_graphs[(n, slot)].replay()
         else:
             self._commit(feats, torch.arange(start, start + n, device=feats.device))
-        self.length = start + n
+        self.lengths[slot] = start + n
 
     def _commit(self, feats, positions):
         n = feats.shape[0]
@@ -247,6 +268,7 @@ class Drafter:
         return self.draft_tokens, self.conf
 
     def capture(self):
+        """Draft graphs per (context bucket, slot) and commit graphs per (rows, slot); one memory pool."""
         dev = self.mask_embed.device
         buckets, b = [], 1024
         while b < self.ctx:
@@ -259,35 +281,43 @@ class Drafter:
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
+            for slot in range(self.slots):
+                self._use(slot)
+                for B in buckets:
+                    self.bucket = B
+                    self._draft()
+                for fn in commit.values():
+                    fn()
+        torch.cuda.current_stream().wait_stream(s)
+        for slot in range(self.slots):
+            self._use(slot)
             for B in buckets:
                 self.bucket = B
-                self._draft()
-            for fn in commit.values():
-                fn()
-        torch.cuda.current_stream().wait_stream(s)
-        for B in buckets:
-            self.bucket = B
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, pool=pool):
-                self._draft()
-            self.graphs[B] = g
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, pool=pool):
+                    self._draft()
+                self.graphs[(B, slot)] = g
+            for n, fn in commit.items():
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, pool=pool):
+                    fn()
+                self.commit_graphs[(n, slot)] = g
         self.bucket = self.ctx
-        for n, fn in commit.items():
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, pool=pool):
-                fn()
-            self.commit_graphs[n] = g
+        self.buckets = buckets
+        self._use(0)
         self.reset()
 
     def draft_distribution(self, n: int, temperature: float):
         """(candidate ids [n, K], q over them [n, K]) of the last draft's first n steps at `temperature`."""
         return self.cand_buf[:n], torch.softmax(self.head_kernels.logits[:n] / temperature, -1)
 
-    def draft(self, anchor: int, P: int, temperature: float = 0.0):
+    def draft(self, anchor: int, P: int, temperature: float = 0.0, slot: int = 0):
         self.anchor.fill_(anchor)
         self.P.fill_(P)
         self.temperature.fill_(temperature)
+        self._use(slot)
         if not self.graphs:
             return self._draft()
-        self.graphs[next((b for b in self.graphs if b >= P + BLOCK), self.ctx)].replay()
+        bucket = next((b for b in self.buckets if b >= P + BLOCK), self.ctx)
+        self.graphs[(bucket, slot)].replay()
         return self.draft_tokens, self.conf

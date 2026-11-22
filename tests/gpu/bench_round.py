@@ -36,17 +36,17 @@ def t(fn, n=50):
 print(f"decode (m=1)      {t(lambda: eng.decode_graph.graph.replay()):.2f} ms")
 eng.drafter.anchor.fill_(1000)
 eng.drafter.P.fill_(P)
-g = eng.drafter.graphs[next(b for b in eng.drafter.graphs if b >= P + 8)]
+g = eng.drafter.graphs[(next(b for b in eng.drafter.buckets if b >= P + 8), 0)]
 print(f"draft             {t(lambda: g.replay()):.2f} ms")
-print(f"drafter commit(4) {t(lambda: eng.drafter.commit_graphs[4].replay()):.2f} ms")
-for m, vg in eng.verify.items():
+print(f"drafter commit(4) {t(lambda: eng.drafter.commit_graphs[(4, 0)].replay()):.2f} ms")
+for m, vg in eng.verify[0].items():
     print(f"verify m={m}        {t(lambda: vg.graph.replay()):.2f} ms")
 print(f"commit_spec       {t(lambda: eng.cache.commit_spec(0, 2)):.3f} ms")
 
 if prof_w:
     from torch.profiler import ProfilerActivity, profile
 
-    vg = eng.verify[prof_w]
+    vg = eng.verify[0][prof_w]
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
         for _ in range(10):
             vg.graph.replay()

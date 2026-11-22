@@ -101,11 +101,12 @@ class Engine:
             from .dspark import Drafter
             self.model.write_taps = True
             self.cache.enable_spec(max(VERIFY_WIDTHS))
-            self.drafter = Drafter(model_dir, self.w, max_ctx)
+            self.drafter = Drafter(model_dir, self.w, max_ctx, slots=slots)
         self.decode_graphs = {bs: FusedDecodeGraph(self.model, self.cache, bs, capture=graphs)
                               for bs in range(1, slots + 1)}
         self.decode_graph = self.decode_graphs[1]
-        self.verify = {m: VerifyGraph(self.model, self.cache, m) for m in VERIFY_WIDTHS} if spec and graphs else {}
+        self.verify = ({slot: {m: VerifyGraph(self.model, self.cache, m, slot=slot) for m in VERIFY_WIDTHS}
+                        for slot in range(slots)} if spec and graphs else {})
         if spec and graphs:
             self.drafter.capture()
         self.gamma = 2.0
@@ -134,9 +135,9 @@ class Engine:
             torch.cuda.synchronize()
             return e0.elapsed_time(e1) / n
 
-        draft = t(lambda: self.drafter.graphs[min(self.drafter.graphs)].replay())
+        draft = t(lambda: self.drafter.graphs[(self.drafter.buckets[0], 0)].replay())
         snap = [x[:, 0].clone() for x in (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)]
-        costs = {m: draft + t(lambda g=g: g.graph.replay()) for m, g in self.verify.items()}
+        costs = {m: draft + t(lambda g=g: g.graph.replay()) for m, g in self.verify[0].items()}
         for x, v in zip((self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv), snap):
             x[:, 0].copy_(v)
         self.drafter.reset()
@@ -170,11 +171,15 @@ class Engine:
         """Fresh prefill of `ids` into a non-zero slot (no reuse, no drafter context). Returns last logits."""
         assert slot != 0
         self.cache.reset_slot(slot)
+        if self.drafter is not None:
+            self.drafter.reset(slot)
         logits = None
         for s in range(0, len(ids), self.prefill_chunk):
             part = ids[s:s + self.prefill_chunk]
             b = Batch.build([SeqChunk(slot, s, len(part), "last")], [part])
             logits = self.model.forward(b, self.cache, self.pws)
+            if self.drafter is not None:
+                self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
         return logits[-1]
 
     # ----------------------------------------------------------- prefix reuse
@@ -187,6 +192,7 @@ class Engine:
                 "ring": (c.local_k[:, 0].clone(), c.local_v[:, 0].clone())}
         if self.drafter is not None:
             d = self.drafter
+            d._use(0)
             snap["draft"] = ({l: (d.k_ctx[l].clone(), d.v_ctx[l].clone()) for l in (0, 2)},
                              {l: d.ctx_pos[l].clone() for l in (0, 2)}, d.f_rnn.clone(), d.length)
         self.snap = snap
@@ -200,6 +206,7 @@ class Engine:
         if self.drafter is not None:
             kv, pos, f, length = snap["draft"]
             d = self.drafter
+            d._use(0)
             for l in (0, 2):
                 d.k_ctx[l].copy_(kv[l][0])
                 d.v_ctx[l].copy_(kv[l][1])
@@ -223,7 +230,7 @@ class Engine:
         if start == 0:
             self.cache.reset_slot(0)
             if self.drafter is not None:
-                self.drafter.reset()
+                self.drafter.reset(0)
         logits = None
         for s in range(start, len(ids), self.prefill_chunk):
             part = ids[s:s + self.prefill_chunk]
@@ -295,17 +302,18 @@ class Engine:
             st.decode_s = time.time() - t0
             st.generated = len(out)
 
-    def spec_round(self, anchor: int, P: int, sp: Sampling, gen, st: "GenStats | None" = None) -> tuple[list[int], int]:
-        """One DSpark round for the sequence in slot 0 whose anchor (sampled, not yet processed) is at P.
+    def spec_round(self, anchor: int, P: int, sp: Sampling, gen, st: "GenStats | None" = None,
+                   slot: int = 0) -> tuple[list[int], int]:
+        """One DSpark round for the sequence in `slot` whose anchor (sampled, not yet processed) is at P.
         Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
-        drafts, conf = self.drafter.draft(anchor, P, max(sp.temperature, 0.0))
+        drafts, conf = self.drafter.draft(anchor, P, max(sp.temperature, 0.0), slot=slot)
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
         m = self._pick_width(confs)
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
-        logits, taps = self.verify[m].run(vt, P)
+        logits, taps = self.verify[slot][m].run(vt, P)
         if sp.temperature <= 0:
             target = logits.argmax(-1)
             acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
@@ -315,8 +323,8 @@ class Engine:
             acc, nxt = self._accept_sampled(drafts[:m - 1], logits, sp, gen)
         commit = acc + 1
         self._observe(confs, m, acc)
-        self.cache.commit_spec(0, commit)
-        self.drafter.commit(taps[:commit], P)
+        self.cache.commit_spec(slot, commit)
+        self.drafter.commit(taps[:commit], P, slot=slot)
         if st is not None:
             st.rounds += 1
             st.accepted += acc

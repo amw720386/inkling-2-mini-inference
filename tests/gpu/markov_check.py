@@ -42,7 +42,7 @@ for fused in (False, True):
     d.commit(feats, 0)
     d.anchor.fill_(1234)
     d.P.fill_(600)
-    g = d.graphs[next(b for b in d.graphs if b >= 608)]
+    g = d.graphs[(next(b for b in d.buckets if b >= 608), 0)]
     for _ in range(3):
         g.replay()
     torch.cuda.synchronize()

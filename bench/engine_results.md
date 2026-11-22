@@ -19,7 +19,8 @@ Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded
 speculative rejection sampling 195.1 tok/s (acceptance length 2.17).
 
 Scheduler (`tests/gpu/bench_concurrency.py`, 4 slots, 16k context, DSpark on): 4 concurrent greedy requests of up to 256
-tokens, 310 tok/s aggregate including prefill (SGLang Balanced c4: 269). Speculation follows the slot-0 request only.
+tokens, ~300 tok/s aggregate including prefill (SGLang Balanced c4: 269); 2 concurrent: 230 tok/s. Each slot has its own
+draft context, so whichever request is left decoding alone speculates.
 
 Batch 4 decode (4 streams, plain): 9.88 ms/step, 405 tok/s aggregate (`tests/gpu/bench_fused.py`).
 

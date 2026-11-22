@@ -1,9 +1,9 @@
 """Continuous batching over the engine's slots (one GPU-owning thread).
 
-Requests are admitted into free slots between steps (prefill runs then). A request alone in slot 0 runs
-DSpark rounds; whenever two or more requests are decoding, they share one batched CUDA-graph decode step.
-The drafter's context follows the slot-0 request through batched steps too, so it resumes speculation as
-soon as it is alone again. Slot 0 is given out first, and only slot 0 keeps prefix reuse.
+Requests are admitted into free slots between steps (prefill runs then). A request decoding alone runs
+DSpark rounds (each slot has its own draft context and verify graphs); whenever two or more requests are
+decoding, they share one batched CUDA-graph decode step, and every request's draft context keeps up, so it
+resumes speculation as soon as it is alone again. Slot 0 is given out first and keeps prefix reuse.
 """
 
 from __future__ import annotations
@@ -78,8 +78,9 @@ class Scheduler:
                 if not self.active:
                     continue
                 try:
-                    if len(self.active) == 1 and 0 in self.active and self.active[0].spec_ok:
-                        self._spec_step(self.active[0])
+                    lone = next(iter(self.active.values())) if len(self.active) == 1 else None
+                    if lone is not None and lone.spec_ok:
+                        self._spec_step(lone)
                     else:
                         self._batched_step()
                 except Exception as exc:  # fail the running requests, keep serving
@@ -110,14 +111,14 @@ class Scheduler:
         if req.sp.seed is not None:
             req.gen = torch.Generator(device="cuda")
             req.gen.manual_seed(req.sp.seed)
-            if slot == 0 and e.drafter is not None:
+            if e.drafter is not None:
                 e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
         t0 = time.time()
         if slot == 0:
             logits, st.reused_tokens = e.prefill(req.ids)
-            req.spec_ok = e.spec
         else:
             logits = e.prefill_slot(slot, req.ids)
+        req.spec_ok = e.spec
         tok = sample(logits, req.sp, req.gen)
         st.prefill_s = time.time() - t0
         req.slot, req.P, req.out = slot, len(req.ids), [tok]
@@ -144,7 +145,7 @@ class Scheduler:
 
     # ---------------------------------------------------------------- steps
     def _spec_step(self, req: Request):
-        new, commit = self.e.spec_round(req.out[-1], req.P, req.sp, req.gen, req.stats)
+        new, commit = self.e.spec_round(req.out[-1], req.P, req.sp, req.gen, req.stats, slot=req.slot)
         req.P += commit
         for t in new:
             req.out.append(t)
@@ -157,8 +158,10 @@ class Scheduler:
         reqs = [self.active[s] for s in sorted(self.active)]
         g = e.decode_graphs[len(reqs)]
         lg = g.step([r.slot for r in reqs], [r.P for r in reqs], [r.out[-1] for r in reqs])
-        if 0 in self.active and e.drafter is not None and self.active[0].spec_ok:
-            e.drafter.commit(g.ws.taps[0:1], self.active[0].P)  # slot 0 is row 0 (rows sorted by slot)
+        if e.drafter is not None:  # keep every request's draft context current for when it runs alone
+            for i, r in enumerate(reqs):
+                if r.spec_ok:
+                    e.drafter.commit(g.ws.taps[i:i + 1], r.P, slot=r.slot)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
         picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}  # one sync
         for i, r in enumerate(reqs):
