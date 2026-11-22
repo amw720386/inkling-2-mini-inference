@@ -253,10 +253,11 @@ class FusedModel:
             fk.qkv_post(qp, 2 * c.q_dim, k_lin, v_lin, dyn, lw, cache.k_conv[vi], cache.v_conv[vi], q, rel, kk, vv,
                         meta.local, meta.tok_seq, pos, c, is_global=not local,
                         cache_kv=(kc, vc) if direct_cache else None, ring=ring, decode_state=decode_state,
-                        kv_fp8=(not local) and kc.dtype == torch.float8_e4m3fn)
+                        kv_fp8=(not local) and kc.dtype == torch.float8_e4m3fn,
+                        cand=(cache.cand['k_conv'][vi], cache.cand['v_conv'][vi]) if verify else None)
             if not decode_state:
-                self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else conv_candidates(k_lin, cache.k_conv[vi], cache.cand['k_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
-                self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else conv_candidates(v_lin, cache.v_conv[vi], cache.cand['v_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
+                self._conv_state(k_lin, cache.k_conv[vi], meta) if not verify else None
+                self._conv_state(v_lin, cache.v_conv[vi], meta) if not verify else None
 
             # ---- attention
             sinks = qp[:, 2 * c.q_dim + c.rel_dim:2 * c.q_dim + c.rel_dim + c.num_heads]
@@ -277,9 +278,10 @@ class FusedModel:
             mi_out = ws.mi[:T] if msgs else ws.x[:T]
             fk.post_attn(o, lw.attn_conv_w, cache.attn_conv[vi], blk, ns, nb, resid, w.mlp_queries[layer],
                          None if msgs else lw.mlp_norm, mi_out, meta.local, meta.tok_seq, c,
-                         boundary=boundary, decode_state=decode_state)
+                         boundary=boundary, decode_state=decode_state,
+                         cand=cache.cand['attn_conv'][vi] if verify else None)
             if not decode_state:
-                self._conv_state(o, cache.attn_conv[vi], meta) if not verify else conv_candidates(o, cache.attn_conv[vi], cache.cand['attn_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
+                self._conv_state(o, cache.attn_conv[vi], meta) if not verify else None
             if boundary:
                 nb += 1
             x = ws.x[:T]
@@ -299,7 +301,7 @@ class FusedModel:
                     rows = moe_decode(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
                                       ws.act[:T * c.top_k], ws.rows[:T * c.top_k])
                 fk.post_mlp(rows, ws.m[:T], lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq,
-                            c, decode_state=decode_state)
+                            c, decode_state=decode_state, cand=cache.cand['mlp_conv'][vi] if verify else None)
                 m = ws.m[:T]
             else:
                 rows = moe_prefill(x, ws.ids[:T], ws.wts[:T], lw.w13, lw.w2, c.mlp_gate_softcap, c.mlp_up_softcap,
@@ -308,7 +310,7 @@ class FusedModel:
                 fk.post_mlp(rows, m, lw.mlp_conv_w, cache.mlp_conv[vi], resid, dst, meta.local, meta.tok_seq, c,
                             decode_state=False)
             if not decode_state:
-                self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else conv_candidates(m, cache.mlp_conv[vi], cache.cand['mlp_conv'][vi], meta.local.seq_slot, meta.local.seq_off, vk, vm)
+                self._conv_state(m, cache.mlp_conv[vi], meta) if not verify else None
 
         hidden = ws.hidden[:T]
         fk.depth_attn(blk, nb + 1, w.output_query, hidden[None], norm_w=w.final_norm[None])

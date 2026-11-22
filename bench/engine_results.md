@@ -9,14 +9,14 @@ torch 2.9.1+cu128, Triton 3.5.1).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 159.3 tok/s | 273.7 tok/s | 149.7 tok/s | 246.7 tok/s |
+| bf16 | 160.0 tok/s | 284.6 tok/s | 150.3 tok/s | 249.6 tok/s |
 | `dense_fp8` | 188.5 tok/s | 281.0 tok/s | 173.8 tok/s | 272.5 tok/s |
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
 
 Sampled decoding at temperature 1.0 (the model's default; same 6 prompts, seeded): plain 159.3 tok/s, DSpark with
-speculative rejection sampling 214.9 tok/s (acceptance length 2.39).
+speculative rejection sampling 219.7 tok/s (acceptance length 2.34).
 
 Scheduler (`tests/gpu/bench_concurrency.py`, 4 slots, 16k context, DSpark on): 4 concurrent greedy requests of up to 256
 tokens, ~300 tok/s aggregate including prefill (SGLang Balanced c4: 269); 2 concurrent: 230 tok/s. Each slot has its own

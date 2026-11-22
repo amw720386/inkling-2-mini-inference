@@ -144,6 +144,17 @@ def _write_decode_state(X, x_stride, t, State, st_base, st_row, ch, cm):
 
 
 @triton.jit
+def _write_cand(X, x_stride, t, i, State, st_base, st_row, Cand, cand_base, cand_row, ch, cm):
+    """Verify: the conv state after committing rows 0..i of this sequence = last 3 of [old state, x_0..x_i]."""
+    for r in tl.static_range(3):
+        src = i - 2 + r
+        inx = src >= 0
+        xv = tl.load(X + (t - 2 + r) * x_stride + ch, mask=cm & inx, other=0.0)
+        sv = tl.load(State + st_base + (3 + src) * st_row + ch, mask=cm & (src < 0), other=0.0)
+        tl.store(Cand + cand_base + r * cand_row + ch, tl.where(inx, xv, sv), mask=cm)
+
+
+@triton.jit
 def _l2clip_vec(x, thr):
     n = tl.sqrt(tl.sum(x * x, axis=-1, keep_dims=True))
     return x * tl.minimum(thr / (n + 1e-6), 1.0)
@@ -165,6 +176,7 @@ def _qkv_post_kernel(
     R_COL: tl.constexpr, K: tl.constexpr,
     GLOBAL: tl.constexpr, WRITE_CACHE: tl.constexpr, RING: tl.constexpr, DECODE_STATE: tl.constexpr,
     KV_FP8: tl.constexpr = False,
+    CandK=None, CandV=None, cand_sb=0, cand_sc=0, cand_sr=0, CAND: tl.constexpr = False,
     PDL: tl.constexpr = PDL_ON,
 ):
     if PDL:
@@ -232,10 +244,14 @@ def _qkv_post_kernel(
     if DECODE_STATE:
         _write_decode_state(KL, kv_stride, t, KState, st_base, st_row, ch, cm)
         _write_decode_state(VL, kv_stride, t, VState, st_base, st_row, ch, cm)
+    if CAND:
+        cb = sq.to(tl.int64) * cand_sb + i * cand_sc
+        _write_cand(KL, kv_stride, t, i, KState, st_base, st_row, CandK, cb, cand_sr, ch, cm)
+        _write_cand(VL, kv_stride, t, i, VState, st_base, st_row, CandV, cb, cand_sr, ch, cm)
 
 
 def qkv_post(qp, r_col, k_lin, v_lin, dyn_kv, lw, kstate, vstate, q_out, r_out, k_out, v_out, meta, tok_seq,
-             positions, cfg, *, is_global, cache_kv=None, ring=0, decode_state=False, kv_fp8=False):
+             positions, cfg, *, is_global, cache_kv=None, ring=0, decode_state=False, kv_fp8=False, cand=None):
     """dyn_kv: (dyn_k, dyn_v) [T, KVH*K] views with equal row stride (global layers)."""
     t = q_out.shape[0]
     kvh, d = cfg.num_kv_heads, cfg.head_dim
@@ -256,6 +272,9 @@ def qkv_post(qp, r_col, k_lin, v_lin, dyn_kv, lw, kstate, vstate, q_out, r_out, 
         H=cfg.num_heads, KVH=kvh, D=d, DR=cfg.d_rel, RE=cfg.rel_extent, R_COL=r_col, K=cfg.sconv_kernel,
         GLOBAL=is_global, WRITE_CACHE=cache_kv is not None, RING=ring, DECODE_STATE=decode_state,
         KV_FP8=kv_fp8,
+        CandK=cand[0] if cand else qp, CandV=cand[1] if cand else qp,
+        cand_sb=cand[0].stride(0) if cand else 0, cand_sc=cand[0].stride(1) if cand else 0,
+        cand_sr=cand[0].stride(2) if cand else 0, CAND=cand is not None,
         num_warps=4,
     )
 
@@ -270,6 +289,7 @@ def _post_attn_kernel(
     TokSeq, SeqSlot, SeqOff, conv_scale, eps,
     BOUNDARY: tl.constexpr, NORM: tl.constexpr, DECODE_STATE: tl.constexpr,
     H: tl.constexpr, BH: tl.constexpr, K: tl.constexpr,
+    Cand=None, cand_sb=0, cand_sc=0, cand_sr=0, CAND: tl.constexpr = False,
     PDL: tl.constexpr = PDL_ON,
 ):
     if PDL:
@@ -287,6 +307,9 @@ def _post_attn_kernel(
     a = ((a + x) * conv_scale).to(tl.bfloat16).to(tl.float32)
     if DECODE_STATE:
         _write_decode_state(O, o_stride, t, State, st_base, st_row, h, hm)
+    if CAND:
+        _write_cand(O, o_stride, t, i, State, st_base, st_row, Cand, sq.to(tl.int64) * cand_sb + i * cand_sc,
+                    cand_sr, h, hm)
     if BOUNDARY:
         resid = a
     else:
@@ -302,14 +325,17 @@ def _post_attn_kernel(
 
 
 def post_attn(o, conv_w, state, blk, ns, part_slot, resid, query, norm_w, out, meta, tok_seq, cfg, *,
-              boundary, decode_state):
+              boundary, decode_state, cand=None):
     t, h = o.shape
     _post_attn_kernel[(t,)](
         o, o.stride(0), conv_w, state, state.stride(0), state.stride(1), blk, blk.stride(0), blk.stride(1), ns,
         part_slot, resid, query, norm_w if norm_w is not None else query, out, out.stride(0),
         tok_seq, meta.seq_slot, meta.seq_off, cfg.conv_out_scale, cfg.rms_eps,
         BOUNDARY=boundary, NORM=norm_w is not None, DECODE_STATE=decode_state, H=h,
-        BH=triton.next_power_of_2(h), K=cfg.sconv_kernel, num_warps=8,
+        BH=triton.next_power_of_2(h), K=cfg.sconv_kernel,
+        Cand=cand if cand is not None else o, cand_sb=cand.stride(0) if cand is not None else 0,
+        cand_sc=cand.stride(1) if cand is not None else 0, cand_sr=cand.stride(2) if cand is not None else 0,
+        CAND=cand is not None, num_warps=8,
     )
 
 
@@ -415,6 +441,7 @@ def _post_mlp_kernel(
     TokSeq, SeqSlot, SeqOff, conv_scale,
     FROM_ROWS: tl.constexpr, TOPK: tl.constexpr, DECODE_STATE: tl.constexpr,
     H: tl.constexpr, BH: tl.constexpr, K: tl.constexpr,
+    Cand=None, cand_sb=0, cand_sc=0, cand_sr=0, CAND: tl.constexpr = False,
     PDL: tl.constexpr = PDL_ON,
 ):
     if PDL:
@@ -440,11 +467,14 @@ def _post_mlp_kernel(
     c = ((c + x) * conv_scale).to(tl.bfloat16).to(tl.float32)
     if DECODE_STATE:
         _write_decode_state(M, m_stride, t, State, st_base, st_row, h, hm)
+    if CAND:
+        _write_cand(M, m_stride, t, i, State, st_base, st_row, Cand, sq.to(tl.int64) * cand_sb + i * cand_sc,
+                    cand_sr, h, hm)
     out = tl.load(Resid + t * H + h, mask=hm, other=0.0) + c
     tl.store(Dst + t * dst_stride + h, out.to(tl.bfloat16), mask=hm)
 
 
-def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, decode_state):
+def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, decode_state, cand=None):
     t, h = resid.shape
     bh = triton.next_power_of_2(h)
     if not decode_state and rows is not None:
@@ -454,7 +484,9 @@ def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, deco
         m_buf, m_buf.stride(0), rows if rows is not None else m_buf, conv_w, state, state.stride(0), state.stride(1), resid, dst, dst.stride(0),
         tok_seq, meta.seq_slot, meta.seq_off, cfg.conv_out_scale,
         FROM_ROWS=decode_state, TOPK=cfg.top_k, DECODE_STATE=decode_state, H=h, BH=bc, K=cfg.sconv_kernel,
-        num_warps=4,
+        Cand=cand if cand is not None else m_buf, cand_sb=cand.stride(0) if cand is not None else 0,
+        cand_sc=cand.stride(1) if cand is not None else 0, cand_sr=cand.stride(2) if cand is not None else 0,
+        CAND=cand is not None, num_warps=4,
     )
 
 
