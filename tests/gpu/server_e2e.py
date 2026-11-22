@@ -146,5 +146,20 @@ while (server.sched.active or server.sched.prefilling) and time.time() - t0 < 10
 freed = not server.sched.active and not server.sched.prefilling
 print(f"disconnect: slot freed {freed} after {time.time() - t0:.2f}s")
 ok &= freed
+# stop sequences: plain and streaming, a stop string spanning tokens, the stop text itself not returned
+body = {"prompt": "Count: 1, 2, 3, 4, 5,", "max_tokens": 40, "stop": [" 9", "never-appears"]}
+r = requests.post(B + "/completions", json=body).json()
+txt, fin = r["choices"][0]["text"], r["choices"][0]["finish_reason"]
+print("stop:", repr(txt), fin)
+ok &= fin == "stop" and " 9" not in txt and "8" in txt
+parts, sfin = [], None
+with requests.post(B + "/completions", json={**body, "stream": True}, stream=True) as rs:
+    for line in rs.iter_lines():
+        if line.startswith(b"data: ") and line[6:] != b"[DONE]":
+            ch = json.loads(line[6:])["choices"][0]
+            parts.append(ch.get("text", ""))
+            sfin = ch.get("finish_reason") or sfin
+print("stop stream:", repr("".join(parts)), sfin)
+ok &= "".join(parts) == txt and sfin == "stop"
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

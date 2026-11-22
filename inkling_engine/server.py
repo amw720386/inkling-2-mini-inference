@@ -231,6 +231,16 @@ class Server:
         return "stop" if out and out[-1] in self.stop_ids else "length"
 
 
+def stop_strings(body: dict) -> list[str]:
+    """The request's `stop` sequences (a string or a list of up to 4, OpenAI style); generation ends before the
+    first occurrence in the output text, which is not returned."""
+    stop = body.get("stop")
+    if stop is None:
+        return []
+    stop = [stop] if isinstance(stop, str) else list(stop)
+    return [x for x in stop if isinstance(x, str) and x]
+
+
 def build_app(server: Server):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, StreamingResponse
@@ -265,25 +275,42 @@ def build_app(server: Server):
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
         req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats)
         split = Splitter()
+        stops = stop_strings(body)
+        hold = max((len(x) for x in stops), default=1) - 1  # chars kept back while a stop string may be forming
         toks: list[int] = []
-        prev_text = ""
+        emitted = 0  # chars of the decoded text already passed on
+        stopped = False
+        text = ""
+
+        def feed(delta, final=False):
+            return split.feed(delta, final=final) if chat else ("", delta, [])
+
         try:
             while True:
                 item = await q.get()
                 if isinstance(item, tuple) and item and item[0] is done:
                     if req.error is not None:
                         raise req.error
-                    r, c, calls = split.feed("", final=True)
+                    tail = "" if stopped else text[emitted:]
+                    r, c, calls = feed(tail, final=True)
                     yield ("delta", r, c, calls)
-                    yield ("end", list(out_tokens), req.stats, rid, created)
+                    yield ("end", list(out_tokens), req.stats, rid, created, stopped)
                     return
+                if stopped:
+                    continue  # tokens generated before the cancel reached the scheduler
                 toks.append(item)
                 text = tok.decode(toks, skip_special_tokens=False)
-                delta, prev_text = text[len(prev_text):], text
-                if delta.endswith("�"):  # incomplete UTF-8 sequence: wait for the next token
-                    prev_text = prev_text[:-1]
-                    delta = delta[:-1]
-                r, c, calls = split.feed(delta) if chat else ("", delta, [])
+                end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
+                if stops:
+                    lo = max(0, emitted - hold)
+                    hits = [i for i in (text.find(x, lo) for x in stops) if i >= 0]
+                    if hits:
+                        end, stopped = min(hits), True
+                        req.cancel.set()
+                    else:
+                        end = max(emitted, end - hold)
+                delta, emitted = text[emitted:end], max(emitted, end)
+                r, c, calls = feed(delta)
                 if r or c or calls:
                     yield ("delta", r, c, calls)
         finally:
@@ -332,8 +359,8 @@ def build_app(server: Server):
                             choice = {"index": 0, "text": c, "finish_reason": None}
                         yield f"data: {json.dumps({'object': obj + '.chunk', 'choices': [choice], 'model': server.model_id})}\n\n"
                     else:
-                        _, out, st, rid, created = ev
-                        fin = "tool_calls" if n_calls[0] else server.finish_reason(out, body)
+                        _, out, st, rid, created, stopped = ev
+                        fin = "tool_calls" if n_calls[0] else ("stop" if stopped else server.finish_reason(out, body))
                         choice = ({"index": 0, "delta": {}, "finish_reason": fin} if chat
                                   else {"index": 0, "text": "", "finish_reason": fin})
                         yield f"data: {json.dumps({'id': rid, 'object': obj + '.chunk', 'created': created, 'model': server.model_id, 'choices': [choice], 'usage': server.usage(ids, out, st)})}\n\n"
@@ -348,8 +375,8 @@ def build_app(server: Server):
                 calls += ev[3] or []
             else:
                 final = ev
-        _, out, st, rid, created = final
-        fin = "tool_calls" if calls else server.finish_reason(out, body)
+        _, out, st, rid, created, stopped = final
+        fin = "tool_calls" if calls else ("stop" if stopped else server.finish_reason(out, body))
         if chat:
             text = "".join(content)
             msg = {"role": "assistant", "content": text if (text or not calls) else None}
