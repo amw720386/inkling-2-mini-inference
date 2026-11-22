@@ -361,11 +361,34 @@ _grouped_tuned = triton.autotune(cache_results=True, configs=_GROUPED_CONFIGS, k
                                  prune_configs_by={"early_config_prune": _prune_grouped})(_grouped_kernel)
 
 
+@triton.jit
+def _route_sort_kernel(Ids, Starts, Ends, RowSrc, P, E: tl.constexpr, BP: tl.constexpr):
+    """One program: stable sort of the P (token, k) pairs by expert. RowSrc[sorted row] = pair index;
+    Starts/Ends[e] bound expert e's rows. Replaces argsort + histogram + scan (several launches)."""
+    i = tl.arange(0, BP)
+    ok = i < P
+    e = tl.load(Ids + i, mask=ok, other=E)  # padding pairs sort last (expert E)
+    ea = tl.arange(0, E)
+    counts = tl.sum((e[None, :] == ea[:, None]).to(tl.int32), 1)  # [E]
+    ends = tl.cumsum(counts, 0)
+    starts = ends - counts
+    tl.store(Starts + ea, starts)
+    tl.store(Ends + ea, ends)
+    # rank of pair i among earlier pairs of its expert (stable)
+    same_before = (e[:, None] == e[None, :]) & (i[None, :] < i[:, None])
+    rank = tl.sum(same_before.to(tl.int32), 1)
+    start_e = tl.sum(tl.where(ea[None, :] == e[:, None], starts[None, :], 0), 1)
+    tl.store(RowSrc + start_e + rank, i, mask=ok)
+
+
 class GroupedScratch:
     def __init__(self, max_tokens: int, top_k: int, n_experts: int, hidden: int, inter: int, device="cuda"):
         p = max_tokens * top_k
         self.ones = torch.ones(p, dtype=torch.int32, device=device)
         self.counts = torch.zeros(n_experts, dtype=torch.int32, device=device)
+        self.starts = torch.zeros(n_experts, dtype=torch.int32, device=device)
+        self.ends = torch.zeros(n_experts, dtype=torch.int32, device=device)
+        self.row_src = torch.zeros(p, dtype=torch.int32, device=device)
         self.tile_expert = torch.arange(n_experts, dtype=torch.int32, device=device)
         self.act = torch.empty(p, inter, dtype=torch.bfloat16, device=device)
         self.rows_sorted = torch.empty(p, hidden, dtype=torch.float32, device=device)
@@ -380,13 +403,9 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     k = ids.shape[1]
     p = t * k
     e, n13, _ = w13.shape
-    flat = ids.reshape(-1).long()
-    order = torch.argsort(flat, stable=True)
-    sc.counts.zero_()
-    sc.counts.index_add_(0, flat, sc.ones[:p])
-    ends = torch.cumsum(sc.counts, 0, dtype=torch.int32)
-    starts = ends - sc.counts
-    row_src = order.to(torch.int32)
+    _route_sort_kernel[(1,)](ids.reshape(-1), sc.starts, sc.ends, sc.row_src, p, E=e,
+                             BP=triton.next_power_of_2(p), num_warps=8)
+    starts, ends, row_src = sc.starts, sc.ends, sc.row_src[:p]
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else sc.counts
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else sc.counts
     act = sc.act[:p]
@@ -403,4 +422,4 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     return rows_out[:p]
 
 
-_pdl_enable(_moe_gemv_kernel, _grouped_kernel, _grouped_tuned)
+_pdl_enable(_route_sort_kernel, _moe_gemv_kernel, _grouped_kernel, _grouped_tuned)
