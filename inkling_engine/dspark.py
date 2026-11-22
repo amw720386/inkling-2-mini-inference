@@ -356,7 +356,7 @@ class Drafter:
                     self._draft_multi(key[0])
                 torch.cuda.current_stream().wait_stream(st)
                 g = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(g):
+                with torch.cuda.graph(g, pool=self.pool):
                     self._draft_multi(key[0])
                 self.multi_graphs[key] = g
             g.replay()
@@ -365,7 +365,7 @@ class Drafter:
             self._draft_multi(key[0])
         return [(self.m_tok[i], self.m_conf[i], self.m_cand[i], self.m_heads[i].logits) for i in range(k)]
 
-    def capture(self):
+    def capture(self, pool=None):
         """Draft graphs per (context bucket, slot) and commit graphs per (rows, slot); one memory pool."""
         dev = self.mask_embed.device
         buckets, b = [], 1024
@@ -375,7 +375,8 @@ class Drafter:
         buckets.append(self.ctx)
         commit = {n: (lambda n=n: self._commit(self.commit_feats[:n], self.commit_start + torch.arange(n, device=dev)))
                   for n in range(1, BLOCK + 1)}
-        pool = torch.cuda.graph_pool_handle()
+        pool = pool if pool is not None else torch.cuda.graph_pool_handle()
+        self.pool = pool
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):

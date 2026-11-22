@@ -48,6 +48,17 @@ Bandwidth context: this RTX PRO 6000 reads at ~1.53 TB/s (`tests/gpu/bench_readb
 ~1.30-1.34 TB/s (87%). A bf16 decode step moves ~5.1 GB (attention projections, experts, LM head), a 3.4 ms floor
 against 6.2 ms measured; the rest is the serial chain of small per-token kernels.
 
+## Memory and robustness
+
+`tests/gpu/memcheck.py` (32 GiB cap): the default server profile (4 slots x 32k context, DSpark, vision) holds
+26.3 GiB after start-up and peaks at 28.8 GiB through a 30k-token prefill; the long-context profile (1 slot,
+256k, `kv_fp8`, vision) 25.2 / 28.4 GiB (31.6 GiB reserved by the allocator, so run it with `--no-vision` on a
+5090 that also drives a display). All CUDA graphs share one memory pool.
+
+`tests/gpu/soak.py`: 60 mixed requests from 6 concurrent clients (chat / completion / tools / 6k-token prompts,
+greedy and sampled, streaming with 20% dropped mid-stream): 0 errors, scheduler drains, allocated memory identical
+across waves.
+
 ## Prefill
 
 19.4k tok/s on an 8k prompt (2048-token chunks, `bench_spec.py`), 12.9k tok/s on 8k random tokens

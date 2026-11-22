@@ -341,7 +341,7 @@ class FusedDecodeGraph:
     """Captured fused decode step for `bs` sequences (one token each, any slots)."""
 
     def __init__(self, model: FusedModel, cache: InklingCache, bs: int, n_split_local: int = 4,
-                 n_split_global: int = 16, capture: bool = True):
+                 n_split_global: int = 16, capture: bool = True, pool=None):
         from .batch import SeqChunk
 
         self.model, self.cache, self.bs = model, cache, bs
@@ -353,6 +353,7 @@ class FusedDecodeGraph:
         self.ws = model.workspace(bs, bs, max(n_split_local, n_split_global))
         self.graph = None
         self.logits = None
+        self.pool = pool
         if capture:
             self._capture()
 
@@ -370,7 +371,7 @@ class FusedDecodeGraph:
                 self._run()
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
+        with torch.cuda.graph(self.graph, pool=self.pool):
             self.logits = self._run()
         for t, v in snap:
             t[:, sl].copy_(v)

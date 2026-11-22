@@ -58,7 +58,7 @@ class VerifyGraph:
     """Captured target forward of k sequences, each its anchor + (m - 1) drafts, in any slots: all rows'
     logits and taps. Conv-state candidates go to cache.cand at batch positions 0..k-1."""
 
-    def __init__(self, model: FusedModel, cache: InklingCache, k: int, m: int, n_split_global: int = 16):
+    def __init__(self, model: FusedModel, cache: InklingCache, k: int, m: int, n_split_global: int = 16, pool=None):
         self.model, self.cache, self.k, self.m = model, cache, k, m
         seqs = [SeqChunk(slot=i, start=0, n=m, want_logits="all") for i in range(k)]
         t = k * m
@@ -77,7 +77,7 @@ class VerifyGraph:
                 self._run()
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
+        with torch.cuda.graph(self.graph, pool=pool):
             self.logits = self._run()
         for x, v in snap:
             x[:, sl].copy_(v)
@@ -125,13 +125,15 @@ class Engine:
             self.model.write_taps = True
             self.cache.enable_spec(max(VERIFY_WIDTHS), slots)
             self.drafter = Drafter(model_dir, self.w, max_ctx, slots=slots)
-        self.decode_graphs = {bs: FusedDecodeGraph(self.model, self.cache, bs, capture=graphs)
+        # every graph shares one memory pool: they never run concurrently and keep outputs in persistent buffers
+        self.pool = torch.cuda.graph_pool_handle()
+        self.decode_graphs = {bs: FusedDecodeGraph(self.model, self.cache, bs, capture=graphs, pool=self.pool)
                               for bs in range(1, slots + 1)}
         self.decode_graph = self.decode_graphs[1]
-        self.verify = ({(k, m): VerifyGraph(self.model, self.cache, k, m) for k in range(1, slots + 1)
+        self.verify = ({(k, m): VerifyGraph(self.model, self.cache, k, m, pool=self.pool) for k in range(1, slots + 1)
                         for m in VERIFY_WIDTHS} if spec and graphs else {})
         if spec and graphs:
-            self.drafter.capture()
+            self.drafter.capture(self.pool)
         self.gamma = 2.0
         self.draft_cost, self.verify_costs, self.decode_costs = 1.0, {}, {}
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}

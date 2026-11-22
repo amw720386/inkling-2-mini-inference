@@ -63,7 +63,7 @@ pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
 pip install safetensors tokenizers transformers fastapi uvicorn pillow
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000            # bf16, DSpark, 4 slots x 32k
-python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144
+python -m inkling_engine.server --model /path/to/Inkling-2-Mini --kv-fp8 --max-ctx 262144 --slots 1 --no-vision
 ```
 
 GPU tests and benchmarks (Modal, `RTX-PRO-6000`):
