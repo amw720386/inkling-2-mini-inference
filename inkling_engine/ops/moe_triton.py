@@ -18,7 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .pdl import PDL_ON, enable as _pdl_enable
+from .pdl import PDL_ON, enable as _pdl_enable, prefetch_rows_l2
 
 from ..quant import ExpertWeight
 
@@ -148,8 +148,13 @@ def _moe_gemv_kernel(
     BN: tl.constexpr, BK: tl.constexpr, HW_FP4: tl.constexpr = True,
     PDL: tl.constexpr = PDL_ON,
 ):
+    if PDL and ACT == 0 and FMT == 0:
+        pe = tl.load(Ids + tl.program_id(0)).to(tl.int64)
+        pn0 = tl.program_id(1) * BN + tl.arange(0, BN)
+        prefetch_rows_l2(W, pe * N + pn0, pn0 < N, K // 2, 512)
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     tl.static_assert(K % BK == 0)
     r = tl.program_id(0)
     pn = tl.program_id(1)
@@ -249,6 +254,7 @@ def _grouped_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     tile = tl.program_id(0)
     pn = tl.program_id(1)
     start = tl.load(TileStart + tile)
@@ -416,9 +422,12 @@ _grouped_tuned = triton.autotune(cache_results=True, configs=_GROUPED_CONFIGS, k
 
 
 @triton.jit
-def _route_sort_kernel(Ids, Starts, Ends, RowSrc, P, E: tl.constexpr, BP: tl.constexpr):
+def _route_sort_kernel(Ids, Starts, Ends, RowSrc, P, E: tl.constexpr, BP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """One program: stable sort of the P (token, k) pairs by expert. RowSrc[sorted row] = pair index;
     Starts/Ends[e] bound expert e's rows. Replaces argsort + histogram + scan (several launches)."""
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     i = tl.arange(0, BP)
     ok = i < P
     e = tl.load(Ids + i, mask=ok, other=E)  # padding pairs sort last (expert E)

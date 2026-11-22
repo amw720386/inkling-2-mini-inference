@@ -9,7 +9,7 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 158.8 tok/s | 295.3 tok/s | 153.8 tok/s | 279.3 tok/s |
+| bf16 | 163.4 tok/s | 298.1 tok/s | 153.6 tok/s | 288.6 tok/s |
 | `dense_fp8` | 190.7 tok/s | 310.5 tok/s | 184.0 tok/s | 270.5 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
@@ -23,6 +23,13 @@ its block attention per KV head instead of SDPA's `enable_gqa`, which copied K/V
 64k context bucket). Multi-slot drafts now pick the context bucket of their longest sequence too (4 slots: 5.05 ->
 2.79 ms; captured per slot set and bucket at start-up). Same drafts, same acceptance; DSpark 284 -> 295 tok/s,
 8k-prompt DSpark 250 -> 279 tok/s, temperature 1 215 -> 224 tok/s.
+
+PDL (on by default since 2026-11-22): every kernel triggers its dependents right after its own wait, and the
+GEMVs prefetch the first 1 KiB of their weight rows into L2 before waiting, overlapping DRAM traffic with the small
+single-program kernels before them. A/B in one process (`tests/gpu/bench_pdl.py`): decode step 6.08 -> 5.91 ms,
+verify(4) 7.82 -> 7.50, verify(8) 8.68 -> 8.27. (The earlier PDL attempt triggered before the wait, which let
+launches cascade and spin, or only at completion, which overlaps nothing.) Enabling the trigger exposed a kernel
+registered for PDL without a wait (the expert sort), which then raced the router; every PDL kernel now waits first.
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.

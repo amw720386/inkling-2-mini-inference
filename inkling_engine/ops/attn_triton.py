@@ -88,6 +88,7 @@ def _attn_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     tile = tl.program_id(0)
     kvh = tl.program_id(1)
     split = tl.program_id(2)
@@ -183,6 +184,7 @@ def _combine_kernel(PartAcc, PartML, Sinks, sink_stride_t, Gate, gate_stride_t, 
                     H: tl.constexpr, D: tl.constexpr, NSPLIT: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     h = tl.program_id(1)
     sp = tl.arange(0, NSPLIT)
@@ -239,6 +241,7 @@ def _store_kv_kernel(KN, VN, kn_stride_t, KCache, VCache, cache_stride_slot, cac
     """One program per (seq, token-in-seq). Ring caches keep only the last RING tokens."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     sq = tl.program_id(0)
     i = tl.program_id(1)
     n = tl.load(SeqN + sq)

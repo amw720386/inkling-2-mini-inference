@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .pdl import PDL_ON, enable as _pdl_enable
+from .pdl import PDL_ON, PREFETCH_BYTES, enable as _pdl_enable, prefetch_rows_l2
 
 MAX_M = 32
 
@@ -24,8 +24,12 @@ _CONFIGS = [
 @triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
 @triton.jit
 def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+    if PDL and N <= 16384:  # not the LM head: its rows would push ~200 MB through L2
+        pc = tl.program_id(0) * BN + tl.arange(0, BN)
+        prefetch_rows_l2(W, pc, pc < N, SW * 2, PREFETCH_BYTES)
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     pid = tl.program_id(0)
     cols = pid * BN + tl.arange(0, BN)
     rows = tl.arange(0, MP)
@@ -139,8 +143,12 @@ def fp8_mm(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
 @triton.jit
 def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Y = (X @ W8^T) * scale[col]; W8 float8_e4m3 [N, K] with one fp32 scale per row."""
+    if PDL and N <= 16384:  # not the LM head: its rows would push ~200 MB through L2
+        pc = tl.program_id(0) * BN + tl.arange(0, BN)
+        prefetch_rows_l2(W, pc, pc < N, SW * 1, PREFETCH_BYTES)
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     pid = tl.program_id(0)
     cols = pid * BN + tl.arange(0, BN)
     rows = tl.arange(0, MP)
@@ -193,8 +201,12 @@ def _seg_gemv_kernel(X, x_stride_in, x_stride_m, W, Sc, Y, M, N, K, SW, SY, B1, 
                      PDL: tl.constexpr = PDL_ON):
     """Y[:, n] = X[seg(n)] @ W[n] for column segments [0,B1) -> input 0, [B1,B2) -> 1, [B2,B3) -> 2,
     [B3,B4) -> 1, [B4,N) -> 2 (boundaries are multiples of BN). X: [3, M, K] (input stride may be 0)."""
+    if PDL and N <= 16384:  # not the LM head: its rows would push ~200 MB through L2
+        pc = tl.program_id(0) * BN + tl.arange(0, BN)
+        prefetch_rows_l2(W, pc, pc < N, SW * (1 if FP8 else 2), PREFETCH_BYTES)
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     pid = tl.program_id(0)
     c0 = pid * BN
     inp = tl.where(c0 < B1, 0, tl.where(c0 < B2, 1, tl.where(c0 < B3, 2, tl.where(c0 < B4, 1, 2))))

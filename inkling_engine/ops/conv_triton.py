@@ -29,6 +29,7 @@ def _conv_out_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     pt = tl.program_id(0)
     pc = tl.program_id(1)
     t = pt * BT + tl.arange(0, BT)
@@ -70,6 +71,7 @@ def _conv_state_kernel(X, x_stride, State, st_slot, st_row, SeqSlot, SeqOff, Seq
                        C: tl.constexpr, K: tl.constexpr, BC: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     sq = tl.program_id(0)
     pc = tl.program_id(1)
     c = pc * BC + tl.arange(0, BC)
@@ -129,6 +131,7 @@ def _conv_cand_kernel(X, x_stride, State, st_slot, st_row, Cand, cand_stride_b, 
     conv state after committing its first c + 1 rows (last 3 of [old state, x_0..x_c]); State is untouched."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     bq = tl.program_id(0)
     cidx = tl.program_id(1)
     pc = tl.program_id(2)

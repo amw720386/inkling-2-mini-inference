@@ -80,6 +80,7 @@ def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_
                        H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     qi = tl.program_id(1)
     h = tl.arange(0, BH)
@@ -104,6 +105,7 @@ def _depth_attn2_kernel(SrcA, a_stride_s, a_stride_t, nsa, QA, OutA, oa_stride_q
     (a loop visit's attention input and its messages). fp32 outputs."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     qi = tl.program_id(1)
     h = tl.arange(0, BH)
@@ -217,6 +219,7 @@ def _qkv_post_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     kvh = tl.program_id(1)
     part = tl.program_id(2)  # 0..GRP-1: one q/rel head of the group; GRP: the K/V convs
@@ -330,6 +333,7 @@ def _post_attn_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     h = tl.arange(0, BH)
     hm = h < H
@@ -384,6 +388,7 @@ def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
     that finishes last for the token (atomic counter) selects the top-k and resets the counter."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     pe = tl.program_id(1)
     h = tl.arange(0, BH)
@@ -422,6 +427,7 @@ _ROUTER_COUNTERS: dict = {}
 def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.constexpr, scale, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     ea = tl.arange(0, E)
     sg = tl.sigmoid(tl.load(Logits + t * l_stride + ea))
@@ -483,6 +489,7 @@ def route(x, w_bf16, bias, logits_buf, ids, wts, top_k, scale, w_f32=None):
 def _moe_sum_kernel(Rows, M, H: tl.constexpr, TOPK: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     h = tl.arange(0, BH)
     hm = h < H
@@ -503,6 +510,7 @@ def _post_mlp_kernel(
 ):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     h = tl.program_id(1) * BH + tl.arange(0, BH)  # every channel is independent: split over programs
     hm = h < H
@@ -555,6 +563,7 @@ def _msg_down_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t,
     """g[t, j, r] = bf16(down_j @ bf16(cat(rms(h_j), rms(m_j)))) for gates j."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     pr = tl.program_id(2)
@@ -592,6 +601,7 @@ def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G
     applies the RMS norm with weight to the whole row, writing bf16 Out."""
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     pb = tl.program_id(2)
@@ -627,6 +637,7 @@ def _msg_norm_kernel(Tmp, tmp_stride_g, tmp_stride_t, SS, Wn, wn_stride, Out, ou
                      NGATE: tl.constexpr, NBLK: tl.constexpr, H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     j = tl.program_id(1)
     b = tl.arange(0, NBLK)
