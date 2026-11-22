@@ -9,8 +9,8 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 163.4 tok/s | 298.1 tok/s | 153.6 tok/s | 288.6 tok/s |
-| `dense_fp8` | 190.7 tok/s | 310.5 tok/s | 184.0 tok/s | 270.5 tok/s |
+| bf16 | 167.2 tok/s | 300.5 tok/s | 158.5 tok/s | 292.2 tok/s |
+| `dense_fp8` | 204.6 tok/s | 342.4 tok/s | 189.0 tok/s | 310.6 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
 Modal machines differ by a few percent in decode. `dense_fp8` now reads the FP8 copies at every step size, including
@@ -30,6 +30,14 @@ single-program kernels before them. A/B in one process (`tests/gpu/bench_pdl.py`
 verify(4) 7.82 -> 7.50, verify(8) 8.68 -> 8.27. (The earlier PDL attempt triggered before the wait, which let
 launches cascade and spin, or only at completion, which overlaps nothing.) Enabling the trigger exposed a kernel
 registered for PDL without a wait (the expert sort), which then raced the router; every PDL kernel now waits first.
+The same head start then went to the router (its expert rows), the message gates (down / gain / forget rows) and
+attention (each program's first cached K/V rows; tile metadata comes from the host, so it is read before the wait):
+decode step 5.92 -> 5.66 ms with PDL in the A/B.
+
+One host sync per DSpark round (tried, `tests/gpu/bench_gap.py`): accepting, committing and drafting the next round
+on the device (masked drafter commit, device-indexed conv-state commit) cut GPU idle per round from 1.07 to 0.82 ms
+(profiler-inflated figures, PDL off) but added about as much GPU work; throughput unchanged within noise, so the
+two-sync round stays.
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.

@@ -51,6 +51,14 @@ def prefetch_rows_l2(W, rows, rmask, row_bytes, PREF_BYTES: tl.constexpr):
     the preceding kernel, so a PDL-launched kernel can fetch them before gdc_wait while its predecessor runs."""
     LINES: tl.constexpr = PREF_BYTES // 128
     wb = W.to(tl.pointer_type(tl.int8), bitcast=True)
-    off = tl.where(rmask, rows, 0).to(tl.int64)[:, None] * row_bytes + (tl.arange(0, LINES) * 128)[None, :]
+    line = tl.minimum(tl.arange(0, LINES) * 128, row_bytes - 1)  # never past the row (PREF_BYTES may exceed it)
+    off = tl.where(rmask, rows, 0).to(tl.int64)[:, None] * row_bytes + line[None, :]
     tl.inline_asm_elementwise("prefetch.global.L2 [$1]; mov.u32 $0, 0;", "=r,l", [wb + off], dtype=tl.int32,
+                              is_pure=False, pack=1)
+
+
+@triton.jit
+def prefetch_l2(ptrs):
+    """L2 prefetch of each address in a pointer tensor (any element type)."""
+    tl.inline_asm_elementwise("prefetch.global.L2 [$1]; mov.u32 $0, 0;", "=r,l", [ptrs], dtype=tl.int32,
                               is_pure=False, pack=1)

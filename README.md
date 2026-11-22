@@ -25,8 +25,8 @@ Batch 1, greedy, 256 new tokens, median of short chat/raw prompts unless noted.
 
 | | plain decode | DSpark decode | 8k-prompt decode (plain / DSpark) | prefill (8k) |
 |---|---:|---:|---:|---:|
-| this engine, bf16 | 163 tok/s | 298 tok/s | 154 / 289 tok/s | ~25k tok/s |
-| this engine, `dense_fp8` | 191 tok/s | 311 tok/s | 184 / 271 tok/s | ~25k tok/s |
+| this engine, bf16 | 167 tok/s | 301 tok/s | 159 / 292 tok/s | ~25k tok/s |
+| this engine, `dense_fp8` | 205 tok/s | 342 tok/s | 189 / 311 tok/s | ~26k tok/s |
 | this engine, bf16 + `fp4_prefill` | same | ~5% lower** | same / ~5% lower** | ~28k tok/s |
 | SGLang (same GPU, cookbook RTX 5090 recipes) | 138 tok/s | 147 tok/s* | 133 / 243 tok/s* | ~18k tok/s |
 
@@ -98,8 +98,8 @@ Profiles (numbers from the RTX PRO 6000 proxy, batch 1):
 
 | goal | flags | decode (plain / DSpark) | 8k prefill* | fidelity |
 |---|---|---:|---:|---|
-| checkpoint math | (none) | 163 / 298 tok/s | 533 ms | bf16 dense layers, as transformers / SGLang |
-| speed | `--dense-fp8` | 191 / 311 tok/s | 506 ms | FP8 attention projections and LM head (GSM8K unchanged) |
+| checkpoint math | (none) | 167 / 301 tok/s | 533 ms | bf16 dense layers, as transformers / SGLang |
+| speed | `--dense-fp8` | 205 / 342 tok/s | 506 ms | FP8 attention projections and LM head (GSM8K unchanged) |
 | long prompts on GeForce | `--dense-fp8 --fp4-prefill` | 189 / 297 tok/s | 368 ms | adds NVFP4 activations for prefill experts (DSpark acceptance a little lower) |
 | long context | `--kv-fp8 --max-ctx 262144 --slots 1` | | | FP8 cache for the full-attention layers |
 

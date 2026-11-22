@@ -23,7 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .pdl import PDL_ON, enable as _pdl_enable
+from .pdl import PDL_ON, enable as _pdl_enable, prefetch_rows_l2
 
 # persistent (graph-safe) scratch for message-norm block sums, keyed by shape
 _SS: dict = {}
@@ -387,6 +387,9 @@ def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
     """Each program computes BE expert logits of one token with one load of its weight rows; the program
     that finishes last for the token (atomic counter) selects the top-k and resets the counter."""
     if PDL:
+        pe0 = tl.program_id(1) * BE + tl.arange(0, BE)
+        prefetch_rows_l2(W, pe0, pe0 < E, H * 2, 8192)
+    if PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
@@ -562,6 +565,9 @@ def _msg_down_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t,
                      RANK: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """g[t, j, r] = bf16(down_j @ bf16(cat(rms(h_j), rms(m_j)))) for gates j."""
     if PDL:
+        r0 = tl.program_id(2) * BR + tl.arange(0, BR)
+        prefetch_rows_l2(Down, (GATE0 + tl.program_id(1)) * RANK + r0, r0 < RANK, 2 * H * 2, 16384)
+    if PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
@@ -599,6 +605,10 @@ def _msg_up_kernel(Hs, hs_stride_g, hs_stride_t, Ms, ms_stride_g, ms_stride_t, G
     """o = (1 - tanh(F g)) * h + tanh(G g) * m for one H block; fp32 to Dst. With NORM, each block also
     writes its sum of squares to SS[t, j, blk], and the block that finishes last for (t, j) (atomic counter)
     applies the RMS norm with weight to the whole row, writing bf16 Out."""
+    if PDL:
+        c0 = tl.program_id(2) * BC + tl.arange(0, BC)
+        prefetch_rows_l2(Forget, (GATE0 + tl.program_id(1)) * H + c0, c0 < H, RANK * 2, 128)
+        prefetch_rows_l2(Gain, (GATE0 + tl.program_id(1)) * H + c0, c0 < H, RANK * 2, 128)
     if PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()

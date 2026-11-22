@@ -21,7 +21,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .pdl import PDL_ON, enable as _pdl_enable
+from .pdl import PDL_ON, enable as _pdl_enable, prefetch_l2
 
 G4 = 4  # padded GQA group (3 query heads per KV head for Inkling-2-Mini)
 
@@ -86,9 +86,6 @@ def _attn_kernel(
     TOK: tl.constexpr, BN: tl.constexpr, NSPLIT: tl.constexpr,
     PDL: tl.constexpr = PDL_ON,
 ):
-    if PDL:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
     tile = tl.program_id(0)
     kvh = tl.program_id(1)
     split = tl.program_id(2)
@@ -110,9 +107,6 @@ def _attn_kernel(
     t_glob = (off + tok).to(tl.int64)
     qpos = start + tok
 
-    d = tl.arange(0, D)
-    q = tl.load(Q + t_glob[:, None] * q_stride_t + head[:, None] * D + d[None, :], mask=row_ok[:, None], other=0.0)
-
     last_tok = tl.minimum(q0 + TOK, n) - 1
     kmax = start + last_tok  # inclusive
     if WINDOW > 0:
@@ -123,6 +117,22 @@ def _attn_kernel(
     per = tl.cdiv(nblk, NSPLIT)
     b0 = split * per
     b1 = tl.minimum(b0 + per, nblk)
+    if PDL:
+        # the tile metadata comes from the host and cached keys before `start` are not written by the preceding
+        # kernel: prefetch this program's first cached K/V rows into L2 while the predecessor runs
+        pend = tl.minimum(kmin + b1 * BN, start)
+        for b in range(b0, tl.minimum(b1, b0 + 4)):
+            kp = kmin + b * BN + tl.arange(0, BN)
+            kp = tl.where(kp < pend, kp, kmin)
+            ci = (kp % RING).to(tl.int64) if RING > 0 else kp.to(tl.int64)
+            po = slot * cache_stride_slot + kvh * D + ci[:, None] * cache_stride_pos + (tl.arange(0, 2) * 64)[None, :]
+            prefetch_l2(KCache + po)
+            prefetch_l2(VCache + po)
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
+    d = tl.arange(0, D)
+    q = tl.load(Q + t_glob[:, None] * q_stride_t + head[:, None] * D + d[None, :], mask=row_ok[:, None], other=0.0)
 
     m_i = tl.full((ROWS,), float("-inf"), tl.float32)
     l_i = tl.zeros((ROWS,), tl.float32)
