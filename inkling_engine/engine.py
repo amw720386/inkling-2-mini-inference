@@ -26,6 +26,15 @@ from .weights import load_weights
 VERIFY_WIDTHS = (2, 4, 8)
 
 
+def _drain(gen):
+    """Run a generator to completion and return its return value."""
+    while True:
+        try:
+            next(gen)
+        except StopIteration as stop:
+            return stop.value
+
+
 @dataclass
 class GenStats:
     prompt_tokens: int = 0
@@ -166,21 +175,10 @@ class Engine:
         self.gamma = min(8.0, max(0.5, self.gamma - 0.05 * err))
 
     # ------------------------------------------------------------------ prefill
-    @torch.inference_mode()
     def prefill_slot(self, slot: int, ids: list[int]) -> torch.Tensor:
-        """Fresh prefill of `ids` into a non-zero slot (no reuse, no drafter context). Returns last logits."""
+        """Fresh prefill of `ids` into a non-zero slot (no prefix reuse). Returns last logits."""
         assert slot != 0
-        self.cache.reset_slot(slot)
-        if self.drafter is not None:
-            self.drafter.reset(slot)
-        logits = None
-        for s in range(0, len(ids), self.prefill_chunk):
-            part = ids[s:s + self.prefill_chunk]
-            b = Batch.build([SeqChunk(slot, s, len(part), "last")], [part])
-            logits = self.model.forward(b, self.cache, self.pws)
-            if self.drafter is not None:
-                self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
-        return logits[-1]
+        return _drain(self.prefill_steps(slot, ids))[0]
 
     # ----------------------------------------------------------- prefix reuse
     def _snapshot(self, ids: list[int]):
@@ -214,33 +212,42 @@ class Engine:
             d.f_rnn.copy_(f)
             d.length = length
 
-    @torch.inference_mode()
     def prefill(self, ids: list[int]) -> tuple[torch.Tensor, int]:
-        """Bring the cache to `ids`. Reuses (a) everything processed so far when `ids` extends it (a
-        continuation), or (b) the previous prompt's snapshot when `ids` extends that prompt (a chat turn whose
-        template re-renders the earlier answer). Returns (last logits, reused tokens)."""
-        prev = self.state_ids
+        """Bring slot 0 to `ids`; see prefill_steps. Returns (last logits, reused tokens)."""
+        return _drain(self.prefill_steps(0, ids))
+
+    @torch.inference_mode()
+    def prefill_steps(self, slot: int, ids: list[int]):
+        """Generator: prefill `ids` into `slot` one chunk per step (yields between chunks so a scheduler can
+        interleave decode steps); returns (last logits, reused tokens). Slot 0 reuses (a) everything processed
+        so far when `ids` extends it, or (b) the previous prompt's snapshot when `ids` extends that prompt (a
+        chat turn whose template re-renders the earlier answer); other slots start fresh."""
         start = 0
-        drafter_ok = lambda n: self.drafter is None or self.drafter.length == n  # noqa: E731
-        if 0 < len(prev) < len(ids) and ids[:len(prev)] == prev and drafter_ok(len(prev)):
-            start = len(prev)
-        elif self.snap is not None and 0 < len(self.snap["ids"]) < len(ids) and ids[:len(self.snap["ids"])] == self.snap["ids"]:
-            self._restore()
-            start = len(self.snap["ids"])
+        if slot == 0:
+            prev = self.state_ids
+            drafter_ok = lambda n: self.drafter is None or self.drafter.length == n  # noqa: E731
+            if 0 < len(prev) < len(ids) and ids[:len(prev)] == prev and drafter_ok(len(prev)):
+                start = len(prev)
+            elif self.snap is not None and 0 < len(self.snap["ids"]) < len(ids) and ids[:len(self.snap["ids"])] == self.snap["ids"]:
+                self._restore()
+                start = len(self.snap["ids"])
         if start == 0:
-            self.cache.reset_slot(0)
+            self.cache.reset_slot(slot)
             if self.drafter is not None:
-                self.drafter.reset(0)
+                self.drafter.reset(slot)
         logits = None
         for s in range(start, len(ids), self.prefill_chunk):
             part = ids[s:s + self.prefill_chunk]
-            b = Batch.build([SeqChunk(0, s, len(part), "last")], [part])
+            b = Batch.build([SeqChunk(slot, s, len(part), "last")], [part])
             logits = self.model.forward(b, self.cache, self.pws)
             if self.drafter is not None:
-                self.drafter.commit(self.pws.taps[:len(part)], s)
-        self.state_ids = list(ids)
-        self._snapshot(ids)
-        return logits[-1], start
+                self.drafter.commit(self.pws.taps[:len(part)], s, slot=slot)
+            if s + self.prefill_chunk < len(ids):
+                yield
+        if slot == 0:
+            self.state_ids = list(ids)
+            self._snapshot(ids)
+        return logits[-1].clone(), start
 
     # ----------------------------------------------------------------- generate
     _probs = staticmethod(probs)

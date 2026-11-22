@@ -25,7 +25,8 @@ import uvicorn  # noqa: E402
 
 tok = AutoTokenizer.from_pretrained(path)
 eng = Engine(path, max_ctx=32768, spec=True)
-app = build_app(Server(eng, tok, "inkling-2-mini"))
+server = Server(eng, tok, "inkling-2-mini")
+app = build_app(server)
 cfg = uvicorn.Config(app, host="127.0.0.1", port=8011, log_level="warning")
 srv = uvicorn.Server(cfg)
 threading.Thread(target=srv.run, daemon=True).start()
@@ -85,5 +86,17 @@ r2 = requests.post(B + "/completions", json={"prompt": "Once upon a time", "max_
                                             "top_p": 0.95, "seed": 7}).json()
 print("sampled:", repr(r["choices"][0]["text"]), "| same seed reproduces:", r["choices"][0]["text"] == r2["choices"][0]["text"])
 ok &= r["choices"][0]["text"] == r2["choices"][0]["text"]
+# client disconnect mid-stream must stop generation and free the slot
+with requests.post(B + "/completions", json={"prompt": "Write a very long story about a dragon.", "max_tokens": 3000,
+                                             "stream": True}, stream=True) as resp:
+    for i, line in enumerate(resp.iter_lines()):
+        if i > 10:
+            break
+t0 = time.time()
+while (server.sched.active or server.sched.prefilling) and time.time() - t0 < 10:
+    time.sleep(0.05)
+freed = not server.sched.active and not server.sched.prefilling
+print(f"disconnect: slot freed {freed} after {time.time() - t0:.2f}s")
+ok &= freed
 print("SERVER", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

@@ -132,37 +132,42 @@ def build_app(server: Server):
         done = object()
         tok = server.tok
 
-        def worker():
-            try:
-                res = server.run(ids, body, lambda t: loop.call_soon_threadsafe(q.put_nowait, t))
-                loop.call_soon_threadsafe(q.put_nowait, (done, res))
-            except Exception as e:  # surfaced to the client
-                loop.call_soon_threadsafe(q.put_nowait, (done, e))
+        out_tokens: list[int] = []
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_token(t):  # scheduler thread -> event loop
+            if t is None:
+                loop.call_soon_threadsafe(q.put_nowait, (done, None))
+            else:
+                out_tokens.append(t)
+                loop.call_soon_threadsafe(q.put_nowait, t)
+
+        max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
+        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token)
         split = Splitter()
         toks: list[int] = []
         prev_text = ""
-        while True:
-            item = await q.get()
-            if isinstance(item, tuple) and item and item[0] is done:
-                res = item[1]
-                if isinstance(res, Exception):
-                    raise res
-                out, st = res
-                r, c = split.feed("", final=True)
-                yield ("delta", r, c, None)
-                yield ("end", out, st, rid, created)
-                return
-            toks.append(item)
-            text = tok.decode(toks, skip_special_tokens=False)
-            delta, prev_text = text[len(prev_text):], text
-            if delta.endswith("�"):  # incomplete UTF-8 sequence: wait for the next token
-                prev_text = prev_text[:-1]
-                delta = delta[:-1]
-            r, c = split.feed(delta) if chat else ("", delta)
-            if r or c:
-                yield ("delta", r, c, None)
+        try:
+            while True:
+                item = await q.get()
+                if isinstance(item, tuple) and item and item[0] is done:
+                    if req.error is not None:
+                        raise req.error
+                    r, c = split.feed("", final=True)
+                    yield ("delta", r, c, None)
+                    yield ("end", list(out_tokens), req.stats, rid, created)
+                    return
+                toks.append(item)
+                text = tok.decode(toks, skip_special_tokens=False)
+                delta, prev_text = text[len(prev_text):], text
+                if delta.endswith("�"):  # incomplete UTF-8 sequence: wait for the next token
+                    prev_text = prev_text[:-1]
+                    delta = delta[:-1]
+                r, c = split.feed(delta) if chat else ("", delta)
+                if r or c:
+                    yield ("delta", r, c, None)
+        finally:
+            if not req.done.is_set():  # the client went away (generator closed): stop generating
+                req.cancel.set()
 
     @app.post("/v1/chat/completions")
     async def chat(req: Request):

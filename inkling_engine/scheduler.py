@@ -36,6 +36,8 @@ class Request:
     gen: torch.Generator | None = None
     spec_ok: bool = False
     t_decode: float = 0.0
+    t_start: float = 0.0
+    prefill_gen: object = None
 
 
 class Scheduler:
@@ -43,6 +45,7 @@ class Scheduler:
         self.e = engine
         self.inbox: queue.Queue = queue.Queue()
         self.waiting: list[Request] = []
+        self.prefilling: list[Request] = []  # slot assigned, prompt being processed chunk by chunk
         self.active: dict[int, Request] = {}
         self.thread = threading.Thread(target=self._loop, daemon=True, name="inkling-scheduler")
         self.thread.start()
@@ -67,7 +70,7 @@ class Scheduler:
         torch.cuda.set_device(0)
         with torch.inference_mode():
             while True:
-                block = not self.active and not self.waiting
+                block = not self.active and not self.waiting and not self.prefilling
                 try:
                     self.waiting.append(self.inbox.get(block=block))
                     while True:
@@ -75,6 +78,8 @@ class Scheduler:
                 except queue.Empty:
                     pass
                 self._admit()
+                if self.prefilling:  # one prompt chunk, then one decode step for the others
+                    self._prefill_step(self.prefilling[0])
                 if not self.active:
                     continue
                 try:
@@ -88,42 +93,67 @@ class Scheduler:
                         req.error = exc
                         self._finish(req)
 
+    def _busy_slots(self):
+        return set(self.active) | {r.slot for r in self.prefilling}
+
     def _admit(self):
         while self.waiting:
-            free = [s for s in range(self.e.slots) if s not in self.active]
+            free = [s for s in range(self.e.slots) if s not in self._busy_slots()]
             if not free:
                 return
             req = self.waiting.pop(0)
             try:
-                self._start(req, 0 if 0 in free else free[0])
+                self._begin(req, 0 if 0 in free else free[0])
             except Exception as exc:
-                req.error = exc
-                req.slot = -1
-                req.on_token(None)
-                req.done.set()
+                self._fail(req, exc)
 
-    def _start(self, req: Request, slot: int):
-        e, st = self.e, req.stats
-        st.prompt_tokens = len(req.ids)
+    def _fail(self, req: Request, exc: Exception):
+        req.error = exc
+        if req in self.prefilling:
+            self.prefilling.remove(req)
+        self.active.pop(req.slot, None)
+        req.slot = -1
+        req.on_token(None)
+        req.done.set()
+
+    def _begin(self, req: Request, slot: int):
+        e = self.e
+        req.stats.prompt_tokens = len(req.ids)
         req.max_new = min(req.max_new, e.max_ctx - len(req.ids) - max(VERIFY_WIDTHS))
         if req.max_new <= 0:
             raise ValueError(f"prompt of {len(req.ids)} tokens does not fit max_ctx {e.max_ctx}")
         if req.sp.seed is not None:
             req.gen = torch.Generator(device="cuda")
             req.gen.manual_seed(req.sp.seed)
-            if e.drafter is not None:
-                e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
-        t0 = time.time()
-        if slot == 0:
-            logits, st.reused_tokens = e.prefill(req.ids)
-        else:
-            logits = e.prefill_slot(slot, req.ids)
-        req.spec_ok = e.spec
+        req.slot = slot
+        req.t_start = time.time()
+        req.prefill_gen = e.prefill_steps(slot, req.ids)
+        self.prefilling.append(req)
+
+    def _prefill_step(self, req: Request):
+        if req.cancel.is_set():
+            self.prefilling.remove(req)
+            req.slot = -1
+            req.on_token(None)
+            req.done.set()
+            return
+        try:
+            next(req.prefill_gen)
+            return  # more chunks to go
+        except StopIteration as stop:
+            logits, req.stats.reused_tokens = stop.value
+        except Exception as exc:
+            self._fail(req, exc)
+            return
+        self.prefilling.remove(req)
+        e = self.e
+        if req.sp.seed is not None and e.drafter is not None:
+            e.drafter.seed.fill_(req.sp.seed & 0x7FFFFFFF)
         tok = sample(logits, req.sp, req.gen)
-        st.prefill_s = time.time() - t0
-        req.slot, req.P, req.out = slot, len(req.ids), [tok]
+        req.stats.prefill_s = time.time() - req.t_start
+        req.P, req.out, req.spec_ok = len(req.ids), [tok], e.spec
         req.t_decode = time.time()
-        self.active[slot] = req
+        self.active[req.slot] = req
         req.on_token(tok)
         self._check_done(req)
 
