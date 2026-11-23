@@ -100,7 +100,7 @@ wait, because none of that depends on the previous kernel.
 ## Prefill
 
 - **Chunks:** prompts prefill in chunks of 2048 tokens. Expert GEMMs are grouped over tiles sorted by expert; a
-  counting sort with no host sync assigns the tiles. Projections use cuBLAS.
+  counting sort with no host sync assigns the tiles. Projections run as FP8 GEMMs by default, cuBLAS in bf16.
 - **Short chunks:** chunks of up to 32 tokens replay a captured graph.
 - **`--fp4-prefill`** (on by default in the server): quantizes the inputs to NVFP4 and runs the expert GEMMs on the
   FP4 tensor cores (as vLLM and SGLang do on this model).
@@ -118,13 +118,13 @@ wait, because none of that depends on the previous kernel.
 - **Prefix reuse:** every slot keeps a snapshot of its last prompt (conv states, rings and drafter context). The
   scheduler routes a request to the slot that holds the longest reusable prefix, so a multi-turn chat only
   prefills its new tokens.
-- **Memory:** all CUDA graphs share one memory pool. The default server profile fits in 32 GiB with 4.6 GiB to
-  spare.
+- **Memory:** all CUDA graphs share one memory pool. The default server profile fits in 32 GiB with about 3 GiB to
+  spare (peak 28.8 GiB by `nvidia-smi`).
 
 ## Testing
 
-- **State handling:** KV, rings, conv states and loop passes are checked bit-exact against the reference model in
-  fp64 (`tests/gpu/state_exact.py`).
+- **State handling:** KV, rings, conv states and loop passes of the reference model are checked bit-exact, one-shot against chunked, in
+  fp64 (`tests/gpu/state_exact.py`). The fused kernels are compared with that reference in `bench/bench_fused.py`.
 - **Logits:** compared with transformers' (`tests/gpu/parity.py`).
 - **Kernels:** each Triton kernel is checked against eager torch (`tests/gpu/test_*.py`).
 - **Server:** an end-to-end API test (`tests/gpu/server_e2e.py`), a mixed-load soak test (`tests/gpu/soak.py`)

@@ -7,7 +7,8 @@
 <p align="center">
   <img src="docs/media/race.gif" width="900"
      alt="Real run, played at 1x: this engine, SGLang and vLLM decode the same prompt on one RTX PRO 6000">
-  <br><sub>Real run on one RTX PRO 6000, played at 1× (<code>--dense-fp8</code> on an earlier version of the engine).</sub>
+  <br><sub>One GSM8K question on one RTX PRO 6000 under a 32 GB limit, played at 1×. Each engine writes its own answer (517, 536 and 641 tokens);
+  an earlier version of this engine.</sub>
 </p>
 
 We're building a single-GPU inference engine for
@@ -18,41 +19,44 @@ follows SGLang's implementation.
 
 ## Where it stands
 
-**Ahead** (same GPU, same 32 GB budget, same client, medians over containers):
+Every engine on one RTX PRO 6000 Blackwell with the whole card (no memory cap) and its own recommended setup, at most 4 running requests,
+same client, tok/s, medians over two containers. The prompts are 24 MT-Bench questions nothing was tuned on, thinking off, natural stopping with a
+512-token limit (6 to 9 of the 24 answers reach it):
 
-- **Single-request decode:** greedy 322 vs 235 (vLLM) and 232 (SGLang) tok/s; temperature 1 267 vs 212 and 192.
-- **Concurrent requests:** 2 requests 463 vs 302 and 298 tok/s; 4 requests 576 vs 437 and 514.
-- **Time to first token:** 168 vs 184 and 223 ms at 4k tokens, and 1421 vs 1675 ms (SGLang) at 30k.
-- **More context in 32 GB:** four slots of 32k tokens each, and 256k on one card with an FP8 cache.
+| | 1 request | 1 request, T=1 | 2 requests | 4 requests | random 1k/1k, 1 request | random 1k/1k, 4 requests | TTFT 4k | TTFT 30k |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| this engine (2) | 295 | 284 | 353 | 539 | 300 | 652 | 168 ms | 1424 ms |
+| SGLang (2) | 194 | 189 | 305 | 466 | 192 | 490 | 199 ms | 1585 ms |
+| vLLM (2) | 210 | 203 | 327 | 435 | 303 | 404 | 184 ms | 1409 ms |
+| vLLM, optimized flags (2) | 212 | 207 | 331 | 441 | 295 | 417 | 193 ms | 1486 ms |
+
+Setups: this engine's server default (FP8 dense weights, FP4 prefill); SGLang's DSpark recipe for this card without its
+multimodal, grammar and tool-parser flags; vLLM 0.34 nightly (`0.34.0rc1.dev1133+g647a76866`, includes #69168) with its DSpark recipe, and with the FP8 cache
+and FLASHINFER attention of its Inkling-2-Mini pull request [#69168](https://github.com/vllm-project/vllm/pull/69168). "random 1k/1k" uses that pull request's
+lengths, but our prompts are independent random ids ([why it isn't comparable with that PR](docs/benchmarks.md)).
+
+- **Ahead:** decode on the MT-Bench prompts for one request (about 1.5x SGLang, 1.4x vLLM) and for four, and time to first token at 4k.
+- **Level or behind:** two requests against vLLM (353 vs 331; its containers reach our slower one), random 1k/1k with one request (300 vs 303),
+  and a 30k-token prompt's first token (vLLM is about 1% faster).
+- Our default uses FP8 dense weights; SGLang and vLLM run theirs in bf16. Fully in bf16 (`--no-dense-fp8 --no-fp4-prefill`, 32 GB cap, one
+  container of ours and of vLLM), this engine decodes 264 tok/s on the MT-Bench prompts against 192 and 211, is level with vLLM at two requests, and takes longer to
+  the first token than both, which keep FP4 prefill (230 ms vs 223 and 184 at 4k).
+- Containers differ by 6-7% for us (12% at two requests) and up to 20% for vLLM, TTFT by about 1%. Read decode gaps below 10% as level.
+- **GSM8K** is level with both (0.835-0.840 vs 0.845 and 0.840, n = 200; standard error about 0.026), raw 5-shot completions without
+  the chat template.
+
+**32 GB limit.** We developed this engine under a 32 GB budget so it fits cards like the RTX 5090. With every engine held to it, on the
+six prompts our scheduler was tuned on, greedy decode is 322 vs 232 (SGLang) and 235 (vLLM's default flags), and 576 vs 514 and 437 tok/s for
+four requests. vLLM's optimized flags reach 260 for one request there. The full tables, the tuning caveat and the flags are in [docs/benchmarks.md](docs/benchmarks.md).
 
   <img src="docs/media/memory.gif" width="720" alt="The 32 GB budget: weights, four 32k KV slots, CUDA graphs; then one 256k FP8 slot">
 
-- **GSM8K** is level with both (0.835-0.840 vs 0.840 and 0.845, n = 200; standard error about 0.026).
-
-**What to know:**
-
-- The server runs FP8 dense weights and FP4 prefill by default, which is not the bf16 checkpoint math.
-  `--no-dense-fp8 --no-fp4-prefill` brings it back (decode 273 tok/s greedy, 4k TTFT 230 ms).
-- Rates depend on the prompts: over the six prompt rotations, individual 4-request runs span 513-777 tok/s. Medians
-  are over 2-5 containers per engine. The table's 30k TTFT has no vLLM value because it doesn't fit in 32 GB.
-- **Without the 32 GB cap** (two containers each, every engine free to use the whole 96 GB card): decode greedy 321 vs
-  235 (vLLM) and 228 (SGLang), 4 requests 565 vs 390 and 512, 4k TTFT 168 vs 184 and 199 ms. At 30k tokens vLLM is level
-  with us (1409 vs 1424 ms); SGLang is at 1585 ms. ([docs/benchmarks.md](docs/benchmarks.md))
-- **RTX 5090:** it should work there. A 5090 has the same GB202 chip and 31.8 GiB of memory, and we tested the engine
-  with only 31.0 GiB left free on the card, from an empty kernel cache. The default and bf16 setups took four 31k-token
-  prompts at once and the 256k setup a 250k-token prompt, peaking at 28.6 GiB (`tests/gpu/fit_5090.py`). We haven't run it on a 5090, so its speed
-  there isn't measured: GeForce cards run bf16 prefill math at half the rate, so the FP8 / FP4 paths matter more.
+**RTX 5090:** it should work there. A 5090 has the same GB202 chip and 31.8 GiB of memory, and we tested the engine with only
+31.0 GiB left free on the card, from an empty kernel cache. The default and bf16 setups took four 31k-token prompts at once and
+the 256k setup a 250k-token prompt, peaking at 28.6 GiB (`tests/gpu/fit_5090.py`). We haven't run it on a 5090, so its speed
+there isn't measured: GeForce cards run bf16 prefill math at half the rate, so the FP8 / FP4 paths matter more.
 
 ![comparison](docs/img/comparison.png)
-
-| | decode, greedy | decode, T=1 | TTFT 4k | TTFT 8k | 2 / 4 concurrent | GSM8K |
-|---|---:|---:|---:|---:|---:|---:|
-| this engine | **322 tok/s** | **267 tok/s** | **168 ms** | **343 ms** | **463 / 576 tok/s** | 0.835 |
-| this engine, bf16 | 273 tok/s | 239 tok/s | 230 ms | 467 ms | 437 / 554 tok/s | 0.853 |
-| vLLM 0.34 nightly | 235 tok/s | 212 tok/s | 184 ms | does not fit | 302 / 437 tok/s | 0.840 |
-| SGLang (Inkling image) | 232 tok/s | 192 tok/s | 223 ms | 434 ms | 298 / 514 tok/s | 0.845 |
-
-All numbers come from an RTX PRO 6000 Blackwell on Modal, with each engine held to a 32 GB budget.
 
 Details:
 
@@ -84,9 +88,11 @@ More in [docs/architecture.md](docs/architecture.md).
 ## Quick start
 
 ```bash
+git clone https://github.com/amw720386/inkling-2-mini-inference && cd inkling-2-mini-inference
+# Linux, NVIDIA Blackwell (sm_120). Weights: hf download thinkingmachines/Inkling-2-Mini --local-dir /path/to/Inkling-2-Mini
 pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
-pip install triton==3.6.0                 # newer than torch's pin; needed for --fp4-prefill
 pip install -e ".[server]"
+pip install triton==3.6.0   # last: torch pins 3.5.1, and the FP4 prefill needs 3.6
 python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000
 ```
 
@@ -107,8 +113,8 @@ Everything runs on [Modal](https://modal.com) (an `RTX-PRO-6000`):
 modal run modal/download_weights.py                        # weights into a Modal volume
 modal run modal/engine_app.py::pytest_gpu                  # kernel tests
 modal run modal/engine_app.py::parity                      # logits vs transformers
-modal run modal/serve_bench.py --engine ours               # also: ours-bf16, sglang, vllm
-python tools/results_table.py && python tools/plot_comparison.py
+modal run modal/serve_bench.py --engine ours --whole-card  # also: sglang, vllm, vllm-fp8kv; --tag 2 for a second container
+python tools/results_table.py --whole-card && python tools/plot_comparison.py
 ```
 
 ## Next
@@ -116,7 +122,6 @@ python tools/results_table.py && python tools/plot_comparison.py
 - Better draft acceptance at 4 concurrent requests (the expert reads are already close to memory bandwidth)
 - Smaller decode-step wins (fused per-visit kernels, verify cost)
 - Measurements on an RTX 5090
-- `--fp4-prefill` without the slight drop in speculative acceptance after an FP4 prefill
 - Re-run the comparison as SGLang and vLLM update their Inkling support
 
 ## Credits
