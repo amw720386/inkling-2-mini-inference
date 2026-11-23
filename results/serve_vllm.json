@@ -1,0 +1,102 @@
+{
+ "model": "/weights/Inkling-2-Mini",
+ "decode_greedy": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 162.6
+   },
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 342.2
+   },
+   {
+    "prompt_tokens": 28,
+    "tokens": 256,
+    "tok_s": 182.1
+   },
+   {
+    "prompt_tokens": 32,
+    "tokens": 256,
+    "tok_s": 204.9
+   },
+   {
+    "prompt_tokens": 5,
+    "tokens": 256,
+    "tok_s": 483.2
+   },
+   {
+    "prompt_tokens": 8,
+    "tokens": 256,
+    "tok_s": 301.3
+   }
+  ],
+  "overall_tok_s": 241.6
+ },
+ "decode_t1": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 216.2
+   },
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 260.7
+   },
+   {
+    "prompt_tokens": 28,
+    "tokens": 256,
+    "tok_s": 181.9
+   },
+   {
+    "prompt_tokens": 32,
+    "tokens": 256,
+    "tok_s": 198.1
+   },
+   {
+    "prompt_tokens": 5,
+    "tokens": 256,
+    "tok_s": 152.7
+   },
+   {
+    "prompt_tokens": 8,
+    "tokens": 256,
+    "tok_s": 280.1
+   }
+  ],
+  "overall_tok_s": 206.0
+ },
+ "ttft": {
+  "1024": {
+   "ttft_ms": 58.1,
+   "prefill_tok_s": 17640
+  },
+  "4096": {
+   "ttft_ms": 182.8,
+   "prefill_tok_s": 22407
+  }
+ },
+ "concurrency": {
+  "1": {
+   "aggregate_tok_s": 329.3
+  },
+  "2": {
+   "aggregate_tok_s": 160.9
+  },
+  "4": {
+   "aggregate_tok_s": 243.2
+  }
+ },
+ "gsm8k": {
+  "n": 200,
+  "accuracy": 0.84,
+  "seconds": 253
+ },
+ "startup_s": 171,
+ "peak_gpu_mib": 33024,
+ "version": "0.34.0rc1.dev1133+g647a76866"
+}

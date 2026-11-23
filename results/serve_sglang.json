@@ -1,0 +1,110 @@
+{
+ "model": "/weights/Inkling-2-Mini",
+ "decode_greedy": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 170.2
+   },
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 286.4
+   },
+   {
+    "prompt_tokens": 28,
+    "tokens": 256,
+    "tok_s": 200.2
+   },
+   {
+    "prompt_tokens": 32,
+    "tokens": 256,
+    "tok_s": 174.1
+   },
+   {
+    "prompt_tokens": 5,
+    "tokens": 256,
+    "tok_s": 453.6
+   },
+   {
+    "prompt_tokens": 8,
+    "tokens": 256,
+    "tok_s": 384.6
+   }
+  ],
+  "overall_tok_s": 240.9
+ },
+ "decode_t1": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 270.0
+   },
+   {
+    "prompt_tokens": 25,
+    "tokens": 256,
+    "tok_s": 266.3
+   },
+   {
+    "prompt_tokens": 28,
+    "tokens": 256,
+    "tok_s": 159.4
+   },
+   {
+    "prompt_tokens": 32,
+    "tokens": 256,
+    "tok_s": 208.0
+   },
+   {
+    "prompt_tokens": 5,
+    "tokens": 256,
+    "tok_s": 175.5
+   },
+   {
+    "prompt_tokens": 8,
+    "tokens": 256,
+    "tok_s": 177.8
+   }
+  ],
+  "overall_tok_s": 200.9
+ },
+ "ttft": {
+  "1024": {
+   "ttft_ms": 94.0,
+   "prefill_tok_s": 10888
+  },
+  "4096": {
+   "ttft_ms": 221.5,
+   "prefill_tok_s": 18489
+  },
+  "8192": {
+   "ttft_ms": 432.0,
+   "prefill_tok_s": 18961
+  },
+  "30000": {
+   "ttft_ms": 1670.5,
+   "prefill_tok_s": 17959
+  }
+ },
+ "concurrency": {
+  "1": {
+   "aggregate_tok_s": 277.8
+  },
+  "2": {
+   "aggregate_tok_s": 338.1
+  },
+  "4": {
+   "aggregate_tok_s": 545.2
+  }
+ },
+ "gsm8k": {
+  "n": 200,
+  "accuracy": 0.845,
+  "seconds": 163
+ },
+ "startup_s": 222,
+ "peak_gpu_mib": 32158,
+ "version": "0.0.0.dev1+inkling2"
+}
