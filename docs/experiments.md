@@ -13,6 +13,11 @@ are in `bench/` and `bench/experiments/`. Each section lists changes in the orde
 | PDL: each kernel triggers its dependents right after its own wait; GEMVs, router, message gates and attention prefetch weights or cached K/V into L2 before the wait | Decode step 6.08 → 5.66 ms, verify(8) 8.68 → 8.27 ms (`bench/bench_pdl.py`) |
 | One-tile depth attention for decode-sized steps | Depth attention 4.4 → 3.7 µs |
 
+| Router top-k picks as one int64-key max instead of max + argmin + gather | Router 5.88 → 4.51 µs per launch, same picks (`bench/bench_router.py`) |
+| Verify-sized MoE row sums split over channel blocks | verify(8) 8.31 → 8.07 ms, bit-identical |
+| NVFP4 decode GEMV launch configs picked from DRAM-cold timings; the autotuner times L2-hot repeats | w13 at T=1 27.8 → 14.8 µs, decode step 5.61 → 5.47 ms (`bench/bench_moe_cold.py`) |
+| Full-attention key blocks far from the queries skip the relative-bias gather | 30k prefill 1998 → 1892 ms (bf16), 131k prefill 26.3 → 15.0 s, DSpark at 131k 123 → 189 tok/s |
+
 An earlier PDL attempt triggered at the start of each kernel: launches cascaded and spun on the SMs (decode
 6.40 → 6.81 ms). Triggering only at completion overlapped nothing. Enabling the trigger after the wait also exposed
 a kernel registered for PDL without a wait, which raced its producer. Every PDL kernel now waits first.
@@ -28,6 +33,20 @@ a kernel registered for PDL without a wait, which raced its producer. Every PDL 
 | Fused drafter commit: one mix launch and one K-norm / rotary / ring-scatter launch per layer, instead of ~240 kernels | Commit 0.25 → 0.05 ms (`bench/prof_commit.py`) |
 | Multi-slot drafts bucketed by context length | 4 slots 5.05 → 2.79 ms |
 | Draft at 0.8x the request temperature (exact for any draft distribution) | +2-4% at temperature 1 (`bench/experiments/bench_draft_temp.py`) |
+
+### Concurrent requests
+
+The old 4-request path was slow for two reasons: the verify costs had been calibrated on identical rows (10.8 ms
+against 18-19 ms with real ones), so the scheduler picked bad widths, and each round synced with the host several
+times.
+
+| Change | Effect |
+|---|---|
+| Sort-based expert ordering for grouped steps | 256 pairs 17.4 → 3.9 µs per launch (`bench/bench_route_sort.py`) |
+| Verify costs measured in place, fixed width per batch size | 4 requests 449 (width 2) / 447-461 (width 8) → 525-533 tok/s at width 4 (`bench/experiments/sched_widths.py`) |
+| One host sync per batched round, one Markov launch for all slots, commits in one gather/scatter | GPU idle 8.5 → 4.0% (`bench/experiments/sched_idle.py`) |
+| The next round's draft launched before tokens are handed out | 516-519 → 532-538 tok/s at 4 requests, through the server |
+| Tokens reach the event loop once per scheduler step | 507-523 → 523-532 tok/s (`bench/experiments/serve_gap.py`) |
 
 ### Prefill
 
@@ -57,4 +76,10 @@ a kernel registered for PDL without a wait, which raced its producer. Every PDL 
 | Router GEMM as 3 × bf16 parts | 1.6x faster, but 30x the fp32 error |
 | NVFP4 copies of the dense weights | Simulated KL 1.45e-2, 3x FP8's (`bench/experiments/fp4_dense_sim.py`) |
 | Larger PDL prefetch (2 / 4 KiB per row) | Smaller verify gains than 1 KiB |
+| FP4 × FP4 tensor-core MoE for verify-sized steps | Bandwidth-bound, no faster at 4-32 rows |
+| Per-request verify widths inside one batched graph (MoE rows masked) | 477-514 vs 508-518 tok/s for a fixed width 4 |
+| One prefill forward for several fresh short prompts | 491-496 vs 501-518 tok/s |
+| Shorter GIL switch interval in the server | 0.5 ms: 480 vs 496-505 tok/s; 0.2 ms: no consistent change |
+| Router with 1 warp, message gate with 2 warps | Faster, but another reduction order flips near-tied experts and changes the outputs compared against SGLang's |
+| Verify widths 3 and 6 | Within noise of 2, 4, 8 |
 | Drafter shortlist of 16k / 64k tokens | 16k loses acceptance; 64k is within noise of 32k |

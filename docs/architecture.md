@@ -93,16 +93,18 @@ wait, because none of that depends on the previous kernel.
   - Sampled requests use speculative rejection sampling, which is exact for the target distribution. The
     drafter samples at 0.8x the request's temperature.
 - **Concurrency:** with several requests active, one drafter pass drafts for every slot and one verify graph
-  checks them all. The scheduler only speculates when the calibrated costs say it beats a plain batched step.
+  checks them all, with one host sync per round. The engine launches the next round's draft before it hands out
+  tokens, so the GPU keeps working during the host's bookkeeping. Rounds use a fixed width per batch size, and the
+  scheduler falls back to plain batched steps when every request's recent acceptance is low.
 
 ## Prefill
 
 - **Chunks:** prompts prefill in chunks of 2048 tokens. Expert GEMMs are grouped over tiles sorted by expert; a
   counting sort with no host sync assigns the tiles. Projections use cuBLAS.
 - **Short chunks:** chunks of up to 32 tokens replay a captured graph.
-- **`--fp4-prefill`:** quantizes the inputs to NVFP4 and runs the expert GEMMs on the FP4 tensor cores (as vLLM
-  and SGLang do on this model).
-- **`--dense-fp8`:** runs the projections as FP8 GEMMs.
+- **`--fp4-prefill`** (on by default in the server): quantizes the inputs to NVFP4 and runs the expert GEMMs on the
+  FP4 tensor cores (as vLLM and SGLang do on this model).
+- **`--dense-fp8`** (on by default in the server): runs the projections as FP8 GEMMs.
 
 ## Caches and memory
 
