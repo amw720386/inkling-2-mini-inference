@@ -3,13 +3,18 @@ name = "inkling-engine"
 version = "0.1.0"
 description = "Single-GPU Inkling-2-Mini inference engine tuned for the RTX 5090"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.9", "triton>=3.5", "safetensors>=0.5", "tokenizers", "transformers"]
+license = "Apache-2.0"
+readme = "README.md"
+dependencies = ["torch>=2.9", "triton>=3.5", "safetensors>=0.5", "tokenizers", "transformers", "pillow"]
 
 [project.optional-dependencies]
 server = ["fastapi", "uvicorn", "xgrammar"]
 
 [tool.setuptools]
 packages = ["inkling_engine", "inkling_engine.ops"]
+
+[tool.setuptools.package-data]
+inkling_engine = ["data/*.bin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
