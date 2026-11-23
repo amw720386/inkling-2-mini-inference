@@ -96,19 +96,25 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   8k unchanged (467). longctx.py: 131k prefill 26.3 -> 15.0 s, decode at 131k plain 112 -> 118, DSpark 123 -> 189.
 
 ## Server default: --dense-fp8 --fp4-prefill
-The server now runs FP8 dense weights and FP4 prefill experts by default (--no-dense-fp8 / --no-fp4-prefill
-give the bf16 checkpoint math; fp4_prefill falls back to off when Triton < 3.6). The engine API defaults are
-unchanged (bf16), so the plain==sglang parity checks still cover the bf16 path. Server benchmarks, same GPU:
-bf16 profile 532.5 / 474.0 tok/s at 4 / 2 concurrent, greedy 325.5, T=1 259.8, TTFT 1k/4k/8k/30k
-66 / 231 / 468 / 1884 ms, GSM8K 0.855; FP8 + FP4 profile 542.6 / 528.5, greedy 385.1, T=1 306.3,
-TTFT 49 / 169 / 352 / 1551 ms, GSM8K 0.84. SGLang: 528-545 / 278-338, greedy 241, T=1 201,
-TTFT 94 / 222 / 432 / 1670.
-Three runs with the new default (serve_ours-default-fp8fp4/-default2/-explicit2): 4 concurrent 540.6 / 533.5 /
-542.6, 2 concurrent 521.7 / 517.7 / 527.5, greedy 324 / 316 / 323, T=1 315 / 301 / 310, TTFT 48 / 168 / 341 / 1415.
-Greedy prompt 0 swings 195-455 tok/s between runs: serve_bench uses ignore_eos and the engine reaches EOS after
-~60 tokens on that prompt, so the rest is post-EOS text whose acceptance depends on the verify widths picked
-(first_request.py: the engine alone gives 417-443 tok/s on it, no first-request stall). Same at 8a23f3d and
-8d7256c, so it is not a regression.
+The server runs FP8 dense weights and FP4 prefill experts by default (--no-dense-fp8 / --no-fp4-prefill give the
+bf16 checkpoint math; fp4_prefill falls back to off without sm_120 or Triton >= 3.6). Engine API defaults stay bf16,
+so the plain==sglang checks still cover the bf16 path.
+Three serve_bench runs (serve_ours-default-fp8fp4 / -default2 / -explicit2), best of 2 reps each: 4 concurrent
+540.6 / 533.5 / 542.6, 2 concurrent 521.7 / 517.7 / 527.5; TTFT 1k 48.4 / 72.2 / 47.6, 4k 166-169, 8k 339-344,
+30k 1414-1431 ms; GSM8K 0.85 / 0.84 / 0.835. SGLang: 528-545 / 278-338, TTFT 94 / 222 / 432 / 1670, GSM8K 0.845.
+Level with SGLang at 4 concurrent and on GSM8K, ahead elsewhere except decode, where the numbers are withdrawn:
+
+DECODE NUMBERS WITHDRAWN. serve_bench's client takes token counts from usage but times first to last chunk with
+non-empty text; post-EOS special tokens decode to empty text in this server, so their time is dropped (T=1 prompt 0
+reads 1478-1501 tok/s, above the ~1080 ceiling of 8 tokens per 7.4 ms round). Every serve_bench "decode greedy" and
+"T=1" figure in this file and in the commit messages of this branch (including 8116b1a) is affected until re-measured
+with the fixed client (fix/serve-bench-timing). Concurrency uses wall time, TTFT and GSM8K are unaffected;
+bench_spec times in the engine.
+
+Separately, greedy prompt 0 is text-dependent past EOS (first_request.py, no HTTP client, ignore-EOS): EOS at token
+58 in every run, then different continuations (different token hashes), accept length 1.3-3.6, 179-459 tok/s; bf16
+and FP8 both show it; no stall (longest gap 11 ms). The first 4-concurrent rep contains that prompt, so compare
+concurrency over all six prompt rotations (sched_widths.py 4 ... 6).
 
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
