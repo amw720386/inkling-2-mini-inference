@@ -61,17 +61,18 @@ if [ "$WHAT" = all ] || [ "$WHAT" = video ]; then
 fi
 
 if [ "$WHAT" = all ] || [ "$WHAT" = gifs ]; then
-  # page  render size  fps  out   (render larger than 960 where labels need it; every GIF is scaled to 960 px wide)
-  while read -r page size fps name; do
+  # page  render size  fps  out  dither   (render larger than 960 where labels need it; every GIF is scaled to 960 px wide;
+  # flat 2D scenes use no dither, which keeps card fills clean; the 3D scenes need bayer for their gradients)
+  while read -r page size fps name dither; do
     node "$SRC/render.js" "$SRC/$page" "$WORK/$name.mp4" --w "${size%x*}" --h "${size#*x}" --fps "$fps" --crf 4
-    ffmpeg -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
+    ffmpeg -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=${dither}:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
     echo "wrote $OUT/$name.gif ($(du -h "$OUT/$name.gif" | cut -f1))"
   done <<'GIFS'
-scenes/gif-race.html 960x540 30 race
-3d/opener.html?gif=1 1280x720 15 loop
-3d/memory.html?gif=1 1280x720 15 memory
-gifs/dspark.html 960x540 20 dspark
-gifs/scheduler.html 960x540 20 scheduler
+scenes/gif-race.html 960x540 30 race bayer:bayer_scale=4
+3d/opener.html?gif=1 1280x720 15 loop bayer:bayer_scale=4
+3d/memory.html?gif=1 1280x720 15 memory bayer:bayer_scale=4
+gifs/dspark.html 960x540 20 dspark none
+gifs/scheduler.html 960x540 20 scheduler none
 GIFS
 fi
 
