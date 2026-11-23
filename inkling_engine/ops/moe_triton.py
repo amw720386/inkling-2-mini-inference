@@ -437,11 +437,9 @@ def _route_sort_kernel(Ids, Starts, Ends, RowSrc, P, E: tl.constexpr, BP: tl.con
     starts = ends - counts
     tl.store(Starts + ea, starts)
     tl.store(Ends + ea, ends)
-    # rank of pair i among earlier pairs of its expert (stable)
-    same_before = (e[:, None] == e[None, :]) & (i[None, :] < i[:, None])
-    rank = tl.sum(same_before.to(tl.int32), 1)
-    start_e = tl.sum(tl.where(ea[None, :] == e[:, None], starts[None, :], 0), 1)
-    tl.store(RowSrc + start_e + rank, i, mask=ok)
+    # stable order by expert: sort keys expert * BP + pair (padding sorts last, so the first P are the pairs)
+    sk = tl.sort(e * BP + i)
+    tl.store(RowSrc + i, sk % BP, mask=ok)
 
 
 class GroupedScratch:
@@ -466,8 +464,9 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     k = ids.shape[1]
     p = t * k
     e, n13, _ = w13.shape
-    _route_sort_kernel[(1,)](ids.reshape(-1), sc.starts, sc.ends, sc.row_src, p, E=e,
-                             BP=triton.next_power_of_2(p), num_warps=8)
+    bp = triton.next_power_of_2(p)
+    nw = 8 if bp == 64 else (1 if bp == 128 else 4)  # bench_route_sort.py
+    _route_sort_kernel[(1,)](ids.reshape(-1), sc.starts, sc.ends, sc.row_src, p, E=e, BP=bp, num_warps=nw)
     starts, ends, row_src = sc.starts, sc.ends, sc.row_src[:p]
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else sc.counts
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else sc.counts

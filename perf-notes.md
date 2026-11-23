@@ -14,6 +14,10 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   bench_spec DSpark 340.4 tok/s (same-day 325.1), round costs 7.43/7.70/8.47 ms, patterns unchanged.
 - Same-day check with the moe_sum change: dense_fp8 plain 209.1 / DSpark 351.3 tok/s (round costs 6.50 / 6.75 /
   7.43 ms); bench_concurrency 2 requests 387 tok/s, 4 requests 424 (main: 382 / 415).
+- Grouped-MoE expert sort (verify / batched steps): tl.sort of keys expert * BP + pair instead of the O(P^2)
+  rank matrix; integer results equal to the old kernel (bench_route_sort.py, incl. heavy collisions).
+  Per launch: P=64 3.31 -> 1.78 us, P=128 8.74 -> 2.16, P=256 (4 slots x width 8) 17.4 -> 3.86.
+  bench_concurrency 4 requests 424 -> 432 tok/s; single-stream verify change is below container noise.
 
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
@@ -34,5 +38,6 @@ Summation-order noise, not a regression.
 - msg_up num_warps 4 -> 2 (bench_msg.py: bit-identical without the norm tail): decode step 5.61 -> 5.46 ms,
   plain 178.5 tok/s, but the norm launches change bits (plain==sglang 19/64 instead of 9/64). With 2 warps only
   for norm-free launches the patterns hold but the gain is gone (175.6 tok/s). Reverted.
-- bench_spec run-to-run noise is about +-3% on DSpark (332 vs 340 tok/s, same code); use bench_round graph
+- bench_spec / bench_concurrency greedy DSpark outputs vary run to run: verify widths follow the calibrated
+  round timings. bench_spec run-to-run noise is about +-3% on DSpark (332 vs 340 tok/s, same code); use bench_round graph
   timings for small changes.
