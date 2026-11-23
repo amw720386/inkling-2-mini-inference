@@ -2,21 +2,22 @@
  "model": "inkling-2-mini",
  "concurrency": {
   "2": {
-   "aggregate_tok_s": 492.1,
+   "aggregate_tok_s": 514.9,
    "runs": [
-    492.1,
-    361.9
+    514.9,
+    384.4
    ]
   },
   "4": {
-   "aggregate_tok_s": 509.2,
+   "aggregate_tok_s": 547.2,
    "runs": [
-    508.7,
-    509.2
+    528.7,
+    547.2
    ]
   }
  },
- "startup_s": 27,
- "peak_gpu_mib": 29141,
+ "server_accept_log": [],
+ "startup_s": 45,
+ "peak_gpu_mib": 29137,
  "version": "2.9.1+cu128 3.6.0"
 }

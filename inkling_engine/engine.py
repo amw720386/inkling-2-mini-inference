@@ -392,6 +392,7 @@ class Engine:
         interleave decode steps); returns (last logits, reused tokens). The slot reuses (a) everything it processed
         so far when `ids` extends it, or (b) its previous prompt's snapshot when `ids` extends that prompt (a chat
         turn whose template re-renders the earlier answer); see `reusable`."""
+        self.predraft_key = None  # a queued draft never carries over to another request (seed, context)
         start = 0
         img_pos = [i for i, t in enumerate(ids) if t == IMAGE_TOKEN_ID]
         if img_pos and (image_feats is None or image_feats.shape[0] != len(img_pos)):
@@ -499,7 +500,12 @@ class Engine:
         """One DSpark round for the sequence in `slot` whose anchor (sampled, not yet processed) is at P.
         Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
         self.harvest_costs()
-        drafts, conf = self.drafter.draft(anchor, P, self._draft_temp(sp), slot=slot)
+        temp = self._draft_temp(sp)
+        if self.predraft_key == ("one", slot, P, anchor, temp):  # queued at the end of the previous round
+            drafts, conf = self.drafter.draft_tokens, self.drafter.conf
+        else:
+            drafts, conf = self.drafter.draft(anchor, P, temp, slot=slot)
+        self.predraft_key = None
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
         seeded = sp.seed is not None
@@ -522,6 +528,9 @@ class Engine:
             self._observe(confs, m, acc)
         self.cache.commit_spec(slot, commit, 0)
         self.drafter.commit(taps[:commit], P, slot=slot)
+        if self.predraft:  # next round's draft goes to the GPU while the host hands out these tokens
+            self.drafter.draft(nxt, P + commit, temp, slot=slot)
+            self.predraft_key = ("one", slot, P + commit, nxt, temp)
         if st is not None:
             st.rounds += 1
             st.accepted += acc

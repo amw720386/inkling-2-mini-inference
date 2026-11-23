@@ -80,6 +80,12 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   nothing changed (a stale pre-draft only writes draft-block KV that the next draft rewrites). Through the
   server, in-container: 516/517/519 -> 532/532/538 tok/s at 4 requests, level with direct (536-538).
 
+- Pre-draft for single-request rounds too (cleared by any prefill, so it never carries over to another
+  request): through the server, 1 request, six prompts: 166/320/234/214/489/425 -> 177/333/240/212/528/423 tok/s.
+- serve_bench on this branch (bf16): 4 requests 525.8 (runs 525.8 / 525.1), 2 requests 475.2, greedy decode
+  317.8, T=1 253.3, GSM8K 0.85; dense_fp8 concurrency: 4 requests 547.2 (528.7 / 547.2), 2 requests 514.9.
+  main: 454 / 473 / 280 / 262 (bf16), 474 / 502 (dense_fp8). SGLang: 528-545 / 278-338 / 241 / 201.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.
