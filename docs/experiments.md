@@ -12,7 +12,6 @@ are in `bench/` and `bench/experiments/`. Each section lists changes in the orde
 | Fused per-token kernels and one CUDA graph per decode step | The engine's base design ([architecture.md](architecture.md)) |
 | PDL: each kernel triggers its dependents right after its own wait; GEMVs, router, message gates and attention prefetch weights or cached K/V into L2 before the wait | Decode step 6.08 → 5.66 ms, verify(8) 8.68 → 8.27 ms (`bench/bench_pdl.py`) |
 | One-tile depth attention for decode-sized steps | Depth attention 4.4 → 3.7 µs |
-
 | Router top-k picks as one int64-key max instead of max + argmin + gather | Router 5.88 → 4.51 µs per launch, same picks (`bench/bench_router.py`) |
 | Verify-sized MoE row sums split over channel blocks | verify(8) 8.31 → 8.07 ms, bit-identical |
 | NVFP4 decode GEMV launch configs picked from DRAM-cold timings; the autotuner times L2-hot repeats | w13 at T=1 27.8 → 14.8 µs, decode step 5.61 → 5.47 ms (`bench/bench_moe_cold.py`) |
@@ -65,7 +64,7 @@ times.
 | Change | Effect |
 |---|---|
 | Configs of the autotuned kernels pinned for sm_120 (`ops/tuned.py`); other GPUs and shapes still autotune | First start with an empty Triton cache 481 → 69 s; every reachable shape of the default, bf16 and 256k profiles is pinned (214 lookups, none tuned) and the choices no longer vary between runs |
-| Configs that spill more than 64 bytes of registers per thread are skipped by the autotuner without being launched | Device memory of a first start, empty cache, 31.0 GiB free: 31.34 → 28.45 GiB (default), 31.54 → 28.63 (bf16), the same as with a warm cache; before, the default profile ran out of memory (`tests/gpu/fit_5090.py`) |
+| Configs that spill more than 64 bytes of registers per thread are skipped by the autotuner without being launched | Device memory of a first start, empty cache: 31.34 → 28.45 GiB (default), 31.54 → 28.63 (bf16), the same as with a warm cache (before, measured with 45 GiB free; after, with 31.0 GiB free, where the default profile had run out of memory; `tests/gpu/fit_5090.py`) |
 
 The extra memory was not unloaded modules (about 950 modules add under 50 MiB): the driver sizes its local-memory pool for
 the largest register spill it has launched, per thread on the whole GPU, and keeps it. Losing attention configs spilled up

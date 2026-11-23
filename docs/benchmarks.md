@@ -1,7 +1,7 @@
 # Benchmarks
 
-**Hardware.** Every number here comes from an NVIDIA RTX PRO 6000 Blackwell on Modal, with the engine held to a
-32 GB budget: 188 SMs and about 1.5 TB/s measured memory bandwidth.
+**Hardware.** Every number here comes from one NVIDIA RTX PRO 6000 Blackwell on Modal (188 SMs, about 1.5 TB/s measured memory bandwidth).
+Each section says whether the 32 GB limit applied.
 
 **RTX 5090.** Does it fit? A second process filled the card until only 31.0 GiB was free (a 5090 has 32607 MiB =
 31.84 GiB in total), so the engine ran into a real device limit. Each job started from its own empty kernel cache, and all
@@ -21,6 +21,39 @@ and the default setup ran out of memory at 31.0 GiB ([experiments.md](experiment
 bandwidth, so the kernels run and decode, which is memory-bound, should carry over. GeForce cards run bf16 tensor-core
 math with fp32 accumulation at half the PRO card's rate, so bf16 prefill should be slower there and the FP8 / FP4 paths
 should gain more. Nothing has been run on a 5090, so no speed here is a 5090 speed.
+
+## The whole card, every engine with its own flags
+
+The fair comparison on this card. No memory cap, every engine on its own recommended setup, at most 4 running requests (our 4 slots, and the limit of SGLang's recipe),
+the same client and container type, two containers each (medians; `tools/results_table.py --whole-card`, `--spread` for each container). Measured 2026-11-23.
+
+| | 1 request | 1 request, T=1 | 2 requests | 4 requests | random 1k/1k, 1 request | random 1k/1k, 4 requests | TTFT 4k | TTFT 30k |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| this engine (2) | 295 | 284 | 353 | 539 | 300 | 652 | 168 ms | 1424 ms |
+| SGLang (2) | 194 | 189 | 305 | 466 | 192 | 490 | 199 ms | 1585 ms |
+| vLLM (2) | 210 | 203 | 327 | 435 | 303 | 404 | 184 ms | 1409 ms |
+| vLLM, optimized flags (2) | 212 | 207 | 331 | 441 | 295 | 417 | 193 ms | 1486 ms |
+
+- **Prompts:** 24 MT-Bench first turns (`tools/build_heldout.py`, the first three of each category), chat rendering with thinking off,
+  greedy unless noted, natural stopping (at most 512 tokens; 6 to 9 of the 24 answers reach it in every engine). Nothing in this repo was tuned on them. `k` requests in flight,
+  a warm-up pass, then the median of three passes; the rate is all completion tokens over the wall time. Greedy passes repeat the same prompts, so a second
+  container mostly measures the machine.
+- **random 1k/1k:** the lengths of vLLM's [pull request 69168](https://github.com/vllm-project/vllm/pull/69168) (1,024 tokens in, 1,024 out, `ignore_eos`, greedy,
+  8 prompts per request in flight, one pass; it reports 348 tok/s on an RTX 5090). Our prompts are independent random ids; vLLM's generator uses consecutive ids, and that PR ran
+  up to 2 requests at `--max-model-len 64000`, so the rates are not comparable with its. With two requests ours measures 415 tok/s, SGLang 257, vLLM 250 and 218 with the
+  optimized flags; vLLM is slower there than with one request, and we have not found out why.
+- **Flags:** this engine's server default; SGLang's `lmsysorg/sglang:inkling-2-mini` DSpark recipe at `--mem-fraction-static 0.8`; vLLM 0.34.0rc1.dev1133+g647a76866
+  nightly (3 commits after #69168 was merged) at `--gpu-memory-utilization 0.9 --max-model-len 32768`, plain and with `--kv-cache-dtype fp8 --attention-backend FLASHINFER`.
+  `modal run modal/serve_bench.py --engine sglang --whole-card` (also `ours`, `vllm`, `vllm-fp8kv`) runs them. Nothing was tuned for the other engines.
+- **Builds:** the TTFT files of this engine come from just before the kernel settings were pinned and the decode files from after; a run after it measures 168.0 and 1420.6 ms at 4k and 30k,
+  so the values are unchanged.
+- **Spread between the two containers:** ours 6-7% (12% at two requests), SGLang 2-4%, vLLM 0-4% for one and two requests and 8-20% for four and for random 1k/1k with four. TTFT about 1%.
+
+### Tuned prompts
+
+The comparison below uses `tests/reference/sglang_ref.json`: four short chat requests and two raw completions of 5-32 tokens, one of which settles into a
+repeating sentence. The scheduler's batch widths and the 0.8x draft temperature were chosen on these same six prompts
+(`bench/experiments/sched_widths.py`, `bench_draft_temp.py`), so these numbers are in-sample for this engine; the MT-Bench table above is the one to quote.
 
 ## Same GPU, same client: this engine vs vLLM vs SGLang
 
@@ -77,11 +110,13 @@ The 32 GB budget is this project's choice. On the whole 96 GB card, each engine 
 | vLLM (2) | 235 | 213 | 320 | 390 | 60 ms | 184 ms | 348 ms | 1409 ms | - | 84.3 GiB |
 | SGLang (2) | 228 | 203 | 299 | 512 | 68 ms | 199 ms | 395 ms | 1585 ms | - | 78.8 GiB |
 
-Every column has the same order as with the cap, except TTFT at 30k, where vLLM is level with this engine (1408-1411 vs
-1422-1426 ms). SGLang's and vLLM's decode rates barely change; vLLM's 30k prefill now fits.
+Every column has the same order as with the cap, except TTFT at 30k, where vLLM is about 1% ahead (1408-1411 vs 1422-1426 ms).
+SGLang's and vLLM's decode rates barely change; vLLM's 30k prefill now fits. With its FP8 cache and FLASHINFER, vLLM's six-prompt greedy
+rate is 257-261 (two containers) and its 30k TTFT 1486 ms, slower than with its default flags.
 
 **vLLM** could not hold a 32k context in this budget. It reported 7.3 GiB of KV cache left after weights, which is
-about 6.9k tokens, so it ran with `--max-model-len 6144`. Its 8k and 30k TTFT are therefore missing here.
+about 6.9k tokens, so it ran with `--max-model-len 6144`. With `--kv-cache-dtype fp8 --attention-backend FLASHINFER` it started at 4,096 here
+(`serve_vllm-fp8kv*.json`); 12,000 and 24,576 did not start, and lengths in between were not tried. Its 8k and 30k TTFT are therefore missing here.
 Without the cap it holds them, but its 4-request rate doesn't improve (341 and 439 tok/s uncapped vs 435 and 439 capped;
 2 requests 320 vs 302).
 
@@ -121,16 +156,19 @@ the server). The standard error at n = 200 is about 0.026, so differences below 
 
 | Configuration | Accuracy |
 |---|---:|
-| this engine, default (FP8 dense + FP4 prefill, through the server, 2 runs) | 0.835, 0.840 |
+| this engine, default (FP8 dense + FP4 prefill, through the server, 5 runs: 3 capped, 2 not) | 0.835 - 0.840 |
 | this engine, bf16 (through the server, 2 runs) | 0.850, 0.855 |
 | this engine, bf16 (in process, 2026-11-22) | 0.825 - 0.860 |
 | SGLang / vLLM (through the server) | 0.845 / 0.840 |
 
-**Agreement with transformers** (`tests/gpu/parity.py`): KL 1.4e-2 on prefill logits, inside the bf16 noise floor
-of this model. Two bf16 evaluations of the same tokens with different batch shapes differ by KL ~5e-2.
+**Agreement with transformers** (`tests/gpu/parity.py`): the plain PyTorch reference in this repo, over the engine's caches, differs from transformers by
+a KL of 1.4e-2 on the prefill logits of one prompt. Two bf16 evaluations of the same tokens with different batch shapes differ by KL ~5e-2, which is also the test's pass limit.
 
-**State handling** (KV, rings, conv states, loop passes) is bit-exact against the reference model in fp64
-(`tests/gpu/state_exact.py`).
+**The fused kernels** are compared with that reference (`bench/bench_fused.py`, 300 random tokens and 12 decode steps, bf16): prefill KL 2.4e-3, decode KL
+1.4e-2, 11 of 12 greedy tokens equal.
+
+**State handling** (KV, rings, conv states, loop passes): the same reference, run one-shot and in chunks, agrees bit-exactly in fp64
+(`tests/gpu/state_exact.py`). It tests the reference model's caches; the fused kernels are covered by the point above.
 
 **Numerics of the options** (`tests/gpu/fp4_e2e.py`, 3072 tokens of natural text):
 
@@ -144,9 +182,9 @@ of this model. Two bf16 evaluations of the same tokens with different batch shap
 
 ```bash
 modal run modal/download_weights.py                       # weights into a Modal volume
-modal run modal/serve_bench.py --engine ours              # also: ours-bf16, sglang, vllm
-modal run modal/serve_bench.py --engine ours --tag 2      # another container
-python tools/results_table.py                             # the table above, from results/
+modal run modal/serve_bench.py --engine ours --whole-card # no memory cap; also: sglang, vllm, vllm-fp8kv; --tag 2 for a second container
+modal run modal/serve_bench.py --engine ours              # 32 GB limit; also: ours-bf16, sglang, vllm
+python tools/results_table.py --whole-card                # the first table; without the flag, the 32 GB one
 python tools/plot_comparison.py                           # docs/img/comparison.png
 modal run modal/engine_app.py::parity --args "bench_spec.py 256"
 ```
