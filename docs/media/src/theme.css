@@ -1,0 +1,40 @@
+/* Shared look for every scene, GIF and diagram in docs/media. Fonts are OFL (see fonts/LICENSE-*). */
+@font-face { font-family: "Inter"; font-weight: 300; src: url("fonts/inter-latin-300-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 400; src: url("fonts/inter-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 500; src: url("fonts/inter-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "JBMono"; font-weight: 300; src: url("fonts/jetbrains-mono-latin-300-normal.woff2") format("woff2"); }
+@font-face { font-family: "JBMono"; font-weight: 400; src: url("fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "JBMono"; font-weight: 500; src: url("fonts/jetbrains-mono-latin-500-normal.woff2") format("woff2"); }
+
+:root {
+  --bg: #05080f;          /* near-black navy */
+  --bg-card: #0a111c;
+  --border: #1c2636;      /* thin rounded card borders, 1px, radius 10px */
+  --text: #e8edf4;        /* headlines, weight 300 */
+  --body: #c3ccd8;
+  --muted: #7d8899;       /* caps labels */
+  --dim: #4a5566;
+  --blue: #3b82f6;        /* this engine; active experts; KV for our engine */
+  --blue-glow: #60a5fa;
+  --grey: #6b7280;        /* baselines (SGLang, vLLM); idle experts */
+  --orange: #f59e0b;      /* accent: the loop / recurrent passes / drafts */
+  --green: #22c55e;       /* only for "correct" / accepted */
+  --red: #ef4444;         /* only for rejected draft tokens */
+  --sans: "Inter", system-ui, sans-serif;
+  --mono: "JBMono", ui-monospace, monospace;
+}
+
+/* Light variant (diagrams only). */
+.light {
+  --bg: #ffffff; --bg-card: #f6f8fb; --border: #d5dce6; --text: #0b1220; --body: #2a3445;
+  --muted: #5b6678; --dim: #9aa4b2; --grey: #9ca3af;
+}
+
+/* Type scale for a 1080 px tall frame; scale with the frame height for other sizes. */
+.label    { font: 400 15px/1.2 var(--mono); letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+.headline { font: 300 46px/1.15 var(--sans); color: var(--text); letter-spacing: -0.01em; }
+.sub      { font: 300 22px/1.4 var(--sans); color: var(--body); }
+.body     { font: 400 17px/1.45 var(--sans); color: var(--body); }
+.num      { font: 400 28px/1 var(--sans); font-variant-numeric: tabular-nums; color: var(--text); }
+.card     { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; }
+.pill-ok  { border: 1px solid var(--green); color: var(--green); border-radius: 999px; font: 400 13px var(--sans); padding: 3px 14px; }

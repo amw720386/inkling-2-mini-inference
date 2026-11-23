@@ -1,0 +1,6 @@
+{
+  "name": "inkling-media",
+  "private": true,
+  "description": "Renders the launch video scenes, GIFs and diagrams frame by frame in headless Chrome",
+  "dependencies": { "puppeteer-core": "^24.0.0" }
+}

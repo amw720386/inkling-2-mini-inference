@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  html, body { margin: 0; background: var(--bg); width: var(--W); height: var(--H); overflow: hidden; }
+  #wrap { position: absolute; left: calc(var(--s) * 96px); right: calc(var(--s) * 96px); top: 0; bottom: 0;
+          display: flex; flex-direction: column; justify-content: center; }
+  .wide #wrap { left: calc(var(--s) * 180px); right: calc(var(--s) * 180px); }
+  #kicker { margin-bottom: calc(var(--s) * 26px); }
+  #head { font: 300 calc(var(--s) * 64px)/1.1 var(--sans); color: var(--text); letter-spacing: -0.015em; max-width: 15em; }
+  #head b { font-weight: 400; color: var(--blue-glow); }
+  #ctx { margin-top: calc(var(--s) * 34px); font: 300 calc(var(--s) * 24px)/1.5 var(--sans); color: var(--body); max-width: 34em; }
+  #url { margin-top: calc(var(--s) * 40px); font: 400 calc(var(--s) * 24px)/1 var(--mono); color: var(--text); }
+  #magni { position: absolute; left: 0; bottom: calc(var(--s) * 64px); font-size: calc(var(--s) * 13px); color: var(--dim); }
+  #stats { margin-top: calc(var(--s) * 40px); width: calc(var(--s) * 640px); }
+  .wide #stats { position: absolute; right: 0; top: 50%; margin-top: calc(var(--s) * -110px); width: calc(var(--s) * 560px); }
+  .row { display: grid; grid-template-columns: calc(var(--s) * 120px) 1fr; align-items: center; height: calc(var(--s) * 40px); }
+  .row .l { font-size: calc(var(--s) * 12px); }
+  .track { position: relative; height: calc(var(--s) * 10px); }
+  .bar { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--grey); }
+  .row.us .bar { background: var(--blue); box-shadow: 0 0 calc(var(--s) * 14px) rgba(59,130,246,.55); }
+  .v { position: absolute; top: 50%; transform: translateY(-50%); font: 400 calc(var(--s) * 20px)/1 var(--sans);
+       color: var(--body); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .row.us .v { color: var(--blue-glow); }
+  .v small { font: 400 calc(var(--s) * 11px) var(--mono); letter-spacing: .15em; color: var(--muted); margin-left: .5em; }
+  .wide #head { max-width: 11em; }
+  .wide #ctx { max-width: 24em; }
+  .label { font-size: calc(var(--s) * 15px); }
+</style></head>
+<body>
+<div id="wrap">
+  <div id="kicker" class="label">Inkling-2-Mini · one 32 GB GPU</div>
+  <div id="head">Decode <b>1.5×</b> faster than SGLang and vLLM.</div>
+  <div id="stats">
+    <div class="row us"><div class="l label">This engine</div><div class="track"><div class="bar" data-v="363.1"></div><div class="v">363<small>TOK/S</small></div></div></div>
+    <div class="row"><div class="l label">SGLang</div><div class="track"><div class="bar" data-v="240.9"></div><div class="v">241<small>TOK/S</small></div></div></div>
+    <div class="row"><div class="l label">vLLM</div><div class="track"><div class="bar" data-v="241.6"></div><div class="v">242<small>TOK/S</small></div></div></div>
+  </div>
+  <div id="ctx">Single-request greedy decode with <span style="font-family:var(--mono);font-size:.9em">--dense-fp8</span>, same GPU, same 32&nbsp;GB budget. 280 tok/s in default bf16. Python and Triton.</div>
+  <div id="url">github.com/amw720386/inkling-2-mini-inference</div>
+  <div id="magni" class="label">Made at Magni</div>
+</div>
+<script src="../lib/scene.js"></script>
+<script>
+  // Numbers: results/serve_ours-fp8.json 363.1, serve_sglang.json 240.9, serve_vllm.json 241.6, serve_ours.json 279.9
+  // (decode_greedy.overall_tok_s). 363.1 / 240.9 = 1.51.
+  if (S.wide) document.body.classList.add('wide');
+  const els = ['#kicker', '#head', '#stats', '#ctx', '#url', '#magni'].map(S.$);
+  const starts = [0.45, 0.6, 0.95, 1.25, 1.55, 1.85];
+  window.SCENE = { duration: 3.5 };
+  const bars = [...document.querySelectorAll('.bar')], vals = [...document.querySelectorAll('.v')];
+  const XMAX = 400;  // axis 0..400 tok/s; bars start at zero
+  window.renderFrame = t => {
+    els.forEach((e, i) => S.fadeUp(e, t, starts[i], null, 0.5));
+    bars.forEach((b, i) => {
+      const k = S.ramp(t, 1.0 + 0.08 * i, 0.9), pct = 100 * (+b.dataset.v / XMAX) * k;
+      b.style.width = pct + '%';
+      vals[i].style.left = `calc(${pct}% + 12px)`;
+      vals[i].style.opacity = S.ramp(t, 1.5 + 0.08 * i, 0.4);
+    });
+  };
+</script>
+</body></html>
