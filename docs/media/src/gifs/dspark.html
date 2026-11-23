@@ -1,0 +1,124 @@
+<!doctype html>
+<!-- README GIF: DSpark speculative decoding, three rounds. Rendered by ../render.js, then gif.sh.
+     Tokens: the greedy output of Inkling-2-Mini for "What is the capital of France? Answer in one sentence."
+     (tests/reference/sglang_ref.json, items[0].output_ids[2:22], decoded with the checkpoint's tokenizer.json).
+     Mechanism: docs/architecture.md "Speculative decoding (DSpark)": 7 drafts per pass, verify at width 2/4/8, greedy keeps
+     the longest matching prefix and the target's own next token. Which drafts miss is illustrative, not measured, and
+     the drafts' own text is not shown (only the accepted tokens, which equal the target's). -->
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>html, body { margin: 0; background: var(--bg); overflow: hidden } svg { display: block }</style>
+</head><body>
+<script src="../lib/scene.js"></script>
+<script src="../diagrams/diag.js"></script>
+<script>
+  const VW = 960, VH = 540;
+  // anchor, the target's tokens for the 7 draft positions (as many as were accepted), accepted count, target's next token
+  const ROUNDS = [
+    { anchor: 'The', ok: [' user', ' asks', ' a', ' simple', ' fact', 'ual', ' question'], next: ':' },
+    { anchor: ':', ok: [' capital', ' of', ' France'], next: '.' },
+    { anchor: '.', ok: [' Need', ' answer', ' in', ' one', ' sentence'], next: '.' },
+  ];
+  // Per-round timeline (seconds from the round start): verify resolves left to right, then the target's own token,
+  // then the output grows, then the tiles clear.
+  const tm = r => { const te = 1.2 + r.ok.length * 0.12 + 0.2;
+    return { te, next: te + 0.15, label: te + 0.4, out: te + 0.75, gone: te + 1.45, len: te + 1.85 } };
+  const R0 = 0.5, STARTS = []; { let a = R0; for (const r of ROUNDS) { STARTS.push(a); a += tm(r).len } }
+  const DUR = STARTS.at(-1) + tm(ROUNDS.at(-1)).len + 1.4;
+  let P;
+  window.SCENE = { duration: DUR, ready: (async () => {
+    await document.fonts.load('300 20px Inter'); await document.fonts.load('400 20px Inter'); await document.fonts.load('400 20px JBMono');
+    P = D.palette(false);
+  })() };
+
+  const X0 = 48, COLS = 9, CW = 80, CG = 6, colX = c => X0 + 96 + c * (CW + CG);
+  const ROW = { draft: 218, target: 300, next: 372 }, TH = 44;
+  const vis = s => s.replace(/^ /, '');                        // a leading space is shown by the gap between tiles
+
+  window.renderFrame = t => {
+    const { el, text, rect, F, runs } = D;
+    document.querySelector('svg')?.remove();
+    const s = D.svg(P, VW, VH, { pxW: S.W, pxH: S.H });
+    const fadeAll = 1 - S.ramp(t, DUR - 0.7, 0.5);
+    s.appendChild(text(X0, 58, 'DSPARK · SPECULATIVE DECODING', F.label(13), P.muted));
+    s.appendChild(text(X0, 100, 'Seven drafts, one verify step.', F.head(34), P.text));
+    s.appendChild(text(X0, 132, 'The drafter guesses 7 tokens; the target checks all of them at once and keeps the longest correct prefix.', F.light(16), P.body));
+
+    // row labels
+    s.appendChild(text(X0, ROW.draft + 27, 'DRAFTER', F.label(11), P.orange));
+    s.appendChild(text(X0, ROW.target + 20, 'TARGET', F.label(11), P.blue));
+    s.appendChild(text(X0, ROW.target + 36, 'width 8', F.body(12), P.muted));
+    s.appendChild(text(X0, ROW.next + 27, 'NEXT', F.label(11), P.muted));
+    for (let c = 0; c < COLS; c++) {
+      s.appendChild(rect(colX(c), ROW.target, CW, TH, { rx: 7, stroke: P.border, sw: 1, dash: '2 4' }));
+    }
+    s.appendChild(text(colX(0) + CW / 2, ROW.target - 10, 'ANCHOR', F.label(9.5), P.dim, { anchor: 'middle' }));
+    for (let c = 1; c <= 7; c++) s.appendChild(text(colX(c) + CW / 2, ROW.target - 10, 'D' + c, F.label(9.5), P.dim, { anchor: 'middle' }));
+
+    // output text so far
+    const out = ['The'];
+    let curRound = -1;
+    ROUNDS.forEach((r, k) => { const u = t - STARTS[k]; if (u >= 0) curRound = k; if (u >= tm(r).out) out.push(...r.ok, r.next) });
+
+    const tile = (c, row, fill, op, label, labColor, o = {}) => {
+      const g = el('g', { opacity: op.toFixed(3) });
+      g.appendChild(rect(colX(c), ROW[row] + (o.dy || 0), CW, TH, { rx: 7, fill, fo: o.fo ?? 0.9, stroke: o.stroke, sw: o.stroke ? 1.4 : null }));
+      if (label != null) g.appendChild(text(colX(c) + CW / 2, ROW[row] + 28 + (o.dy || 0), label, F.code(14), labColor, { anchor: 'middle' }));
+      if (o.cross) g.appendChild(D.cross(colX(c) + CW / 2 - 7, ROW[row] + 15, 14, '#ffffff', 2.2));
+      s.appendChild(g);
+    };
+
+    if (curRound >= 0) {
+      const r = ROUNDS[curRound], u = t - STARTS[curRound], na = r.ok.length, T = tm(r);
+      const gone = 1 - S.ramp(u, T.gone, 0.35);                  // the round's tiles clear before the next round
+      const A = S.ramp(u, 0.0, 0.3) * gone * fadeAll;
+      tile(0, 'target', P.blue, A, vis(r.anchor), '#ffffff', { fo: 0.25, stroke: P.blue });
+      for (let i = 1; i <= 7; i++) {
+        // drafts appear in one pass, then copy into the verify row
+        const dIn = S.ramp(u, 0.3 + i * 0.04, 0.25), dDim = 1 - 0.65 * S.ramp(u, 0.85, 0.3);
+        tile(i, 'draft', P.orange, dIn * dDim * gone * fadeAll, null);
+        const vIn = S.ramp(u, 0.75 + i * 0.03, 0.3);
+        const tRes = 1.2 + (Math.min(i, na + 1) - 1) * 0.12;        // left to right; everything after the miss at once
+        const res = S.ramp(u, i <= na + 1 ? tRes : tRes + 0.15, 0.2);
+        let fill = P.orange, lab = null, cross = false, fo = 0.9, lc = '#ffffff';
+        if (res > 0.5) {
+          if (i <= na) { fill = P.green; lab = vis(r.ok[i - 1]); lc = '#04140a' }
+          else if (i === na + 1) { fill = P.red; cross = true }
+          else { fill = P.grey; fo = 0.25 }
+        }
+        tile(i, 'target', fill, vIn * gone * fadeAll, lab, lc, { fo, cross });
+      }
+      // the target's own next token, at the column after the accepted prefix
+      const nIn = S.ramp(u, T.next, 0.25) * gone * fadeAll;
+      tile(na + 1, 'next', P.blue, nIn, vis(r.next), '#ffffff');
+      s.appendChild(el('path', { d: `M${colX(na + 1) + CW / 2} ${ROW.target + TH + 3} L${colX(na + 1) + CW / 2} ${ROW.next - 3}`,
+        stroke: P.blue, 'stroke-width': 1.4, opacity: nIn.toFixed(3) }));
+      const kIn = S.ramp(u, T.label, 0.3) * gone * fadeAll;
+      const leftSide = na + 1 >= 5;
+      s.appendChild(runs(leftSide ? colX(na + 1) - 14 : colX(na + 1) + CW + 14, ROW.next + 28, [['+' + (na + 1) + ' tokens', F.body(16), P.text],
+        ['  from one verify step', F.body(14), P.muted]], { anchor: leftSide ? 'end' : null }));
+      s.lastChild.setAttribute('opacity', kIn.toFixed(3));
+    }
+
+    // the output stream
+    const oy = 436;
+    s.appendChild(D.card(P, X0, oy, VW - 2 * X0, 58, { rx: 10 }));
+    s.appendChild(text(X0 + 16, oy + 22, 'OUTPUT', F.label(10), P.muted));
+    let x = X0 + 16;
+    const fresh = curRound >= 0 ? ROUNDS[curRound].ok.length + 1 : 0;
+    const freshT = curRound >= 0 ? t - STARTS[curRound] - tm(ROUNDS[curRound]).out : 99;
+    out.forEach((tok, i) => {
+      const isNew = i >= out.length - fresh && freshT >= 0;
+      const hi = isNew ? 1 - S.ramp(freshT, 0.5, 0.6) : 0;
+      const f = F.body(16), w = D.measure(tok, f);
+      const lead = tok.length - tok.trimStart().length ? D.measure(' ', f) : 0;
+      if (hi > 0.01) s.appendChild(rect(x + lead - 1, oy + 30, w - lead + 2, 22, { rx: 4, fill: P.green, fo: 0.3 * hi }));
+      s.appendChild(text(x + lead, oy + 46, tok.trimStart(), f, P.text, { opacity: fadeAll < 1 && i > 0 ? fadeAll.toFixed(3) : null }));
+      x += w;
+    });
+    s.appendChild(text(X0, 522, 'A real greedy output of Inkling-2-Mini; which drafts miss here is illustrative. Sampled requests use rejection sampling, exact for the target.',
+      F.body(12), P.muted));
+    document.body.appendChild(s);
+  };
+</script>
+</body></html>

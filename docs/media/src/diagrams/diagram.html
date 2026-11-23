@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- One architecture diagram: diagram.html?name=request-path&theme=dark. export-svg.js saves window.DIAGRAM as SVG. -->
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>html, body { margin: 0; background: var(--bg); } body.light { background: #fff } svg { display: block }</style>
+</head><body>
+<script src="diag.js"></script>
+<script src="diagrams.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const light = q.get('theme') === 'light';
+  if (light) document.body.className = 'light';
+  await document.fonts.load('300 20px Inter'); await document.fonts.load('400 20px Inter');
+  await document.fonts.load('500 20px Inter'); await document.fonts.load('400 20px JBMono');
+  await document.fonts.ready;
+  const P = D.palette(light);
+  const svg = DIAGRAMS[q.get('name')](P);
+  document.body.appendChild(svg);
+  window.DIAGRAM = svg;
+  window.AUDIT = D.audit(svg);
+})();
+</script>
+</body></html>
