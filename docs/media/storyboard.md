@@ -43,8 +43,9 @@ Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before re
 
 - Re-render the video and `race.gif`. The race data is an earlier engine's `--dense-fp8` run and its tok/s used the
   old timing; re-capture with `race/capture.py --engines ours,sglang,vllm`, then `pick.py` and `build_race.py`.
-- `memory-layout` diagrams show the bf16 profile. The FP8 default measures 25.9 GiB after start, 27.4 GiB peak
-  (`tests/gpu/memcheck.py`); the memory scene and `memory.gif` use these numbers and FP8 weight sizes (18.6 GiB).
+- Done: the memory scene, `memory.gif` and the `memory-layout` diagrams use the FP8 default (25.9 / 27.4 GiB and
+  24.9 / 27.1 GiB, `tests/gpu/memcheck.py`; FP8 weight sizes computed in `src/3d/memory.js` and `src/diagrams/diagrams.js`).
+  The launch mp4s get the new scene 4 with the video re-render above.
 - Drop or redraw `scheduler.gif`: its idle-GPU claim is wrong (a trace shows the GPU busy 91-94% of the time).
 - `render_modal.py` is meant to run `render.sh` on a Modal container. It has not been run yet.
 

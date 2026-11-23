@@ -229,21 +229,26 @@
   }
 
   // ---------------------------------------------------------------- memory layout
-  // Totals are measured: tests/gpu/memcheck.py (default: 26.4 GiB after start, 28.8 peak) and tests/gpu/longctx.py
-  // (--kv-fp8 --max-ctx 262144 --slots 1: 25.3 / 28.6), docs/benchmarks.md. Segments are computed:
+  // Totals are measured at the server defaults (FP8 dense weights, FP4 prefill, vision): tests/gpu/memcheck.py runs both
+  // profiles (default: 25.9 GiB after start, 27.4 peak; --kv-fp8 --max-ctx 262144 --slots 1: 24.9 / 27.1),
+  // docs/benchmarks.md. Segments are computed:
   //   checkpoint tensors (model-00001-of-00001.safetensors header): experts 14.59 GiB, embedding + LM head 1.73,
   //   other dense weights 1.27, vision tower 0.59; drafter mtp.safetensors 0.59.
+  //   FP8 dense (fused_model.py, compact()): the padded attention projections (207,872 rows x 2304) and wo
+  //   (24 x 2304 x 3072) become E4M3 with a 4 B scale per row and the bf16 copies are dropped (-0.445, -0.158 GiB:
+  //   other dense 1.27 -> 0.67); the LM head keeps bf16 and adds an FP8 copy (201,024 x 2304 + scales, +0.432 GiB:
+  //   embedding + LM head 1.73 -> 2.16).
   //   KV (cache.py CacheSpec.bytes): 8 full-attention visits x 8 KV heads x 128 x (K, V) = 16 Ki values per token:
   //   bf16 32 KiB/token x 32k x 4 slots = 4.0 GiB; FP8 16 KiB/token x 256k x 1 slot = 4.0 GiB.
   //   Sliding rings: 40 visits x 1088 positions x 1024 x (K, V) x bf16 = 0.166 GiB per slot.
   //   "graphs, workspaces, snapshots" = measured after-start total minus the computed segments.
   const MEM = {
-    def: { title: 'DEFAULT SERVER', sub: '4 slots × 32k context, bf16 KV, DSpark, vision', after: 26.4, peak: 28.8,
-      segs: [['expert weights', 14.59, 'w', ['expert weights', '14.6 GiB']], ['embedding + LM head', 1.73, 'w2'], ['other dense', 1.27, 'w3'], ['vision tower', 0.59, 'w3'],
+    def: { title: 'DEFAULT SERVER', sub: '4 slots × 32k context, bf16 KV, DSpark, vision', after: 25.9, peak: 27.4,
+      segs: [['expert weights', 14.59, 'w', ['expert weights', '14.6 GiB']], ['embedding + LM head', 2.16, 'w2'], ['other dense', 0.67, 'w3'], ['vision tower', 0.59, 'w3'],
              ['drafter', 0.59, 'd'], ['KV', 1.0, 'kv', ['32k', '1.0']], ['KV', 1.0, 'kv', ['32k', '1.0']], ['KV', 1.0, 'kv', ['32k', '1.0']], ['KV', 1.0, 'kv', ['32k', '1.0']],
              ['sliding rings', 0.664, 'ring']] },
-    long: { title: 'LONG CONTEXT', sub: '--kv-fp8 --max-ctx 262144 --slots 1 --no-vision', after: 25.3, peak: 28.6,
-      segs: [['expert weights', 14.59, 'w', ['expert weights', '14.6 GiB']], ['embedding + LM head', 1.73, 'w2'], ['other dense', 1.27, 'w3'],
+    long: { title: 'LONG CONTEXT', sub: '--kv-fp8 --max-ctx 262144 --slots 1, vision', after: 24.9, peak: 27.1,
+      segs: [['expert weights', 14.59, 'w', ['expert weights', '14.6 GiB']], ['embedding + LM head', 2.16, 'w2'], ['other dense', 0.67, 'w3'], ['vision tower', 0.59, 'w3'],
              ['drafter', 0.59, 'd'], ['KV', 4.0, 'kv', ['one 256k slot, FP8', '4.0 GiB']], ['sliding ring', 0.166, 'ring']] },
   };
   function memoryLayout(P) {
@@ -326,7 +331,7 @@
       'The 40 sliding-window visits keep a ring of 1088 positions per slot, whatever the context length.'] });
     s.appendChild(eq.g);
     const fy = ey + eq.h + 24;
-    footer(s, P, 40, fy, 'Totals measured on the RTX PRO 6000 proxy with a 32 GiB cap (tests/gpu/memcheck.py, tests/gpu/longctx.py; ' +
+    footer(s, P, 40, fy, 'Totals measured on an RTX PRO 6000 with a 32 GiB cap at the server defaults (tests/gpu/memcheck.py; ' +
       'docs/benchmarks.md). Segments computed from the checkpoint’s tensor sizes and cache.py; the dashed segment is the measured total minus them.', W - 80);
     const H = fy + 50;
     for (const t of [...s.querySelectorAll('text[paint-order]')]) s.appendChild(t);
