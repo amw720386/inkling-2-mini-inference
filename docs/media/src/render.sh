@@ -4,6 +4,7 @@
 #   docs/media/src/render.sh            # everything
 #   docs/media/src/render.sh video      # hero video only (both aspect ratios)
 #   docs/media/src/render.sh gifs       # README GIFs only
+#   docs/media/src/render.sh diagrams   # SVG diagrams only
 #
 # Needs: node >= 18, ffmpeg, and Chrome or chrome-headless-shell (set CHROME=/path if render.js cannot find it).
 # Intermediate scene clips go to $WORK (default: a temp dir) and are deleted at the end.
@@ -17,11 +18,11 @@ XF=0.4   # cross-fade between scenes, seconds
 [ -d "$SRC/node_modules" ] || (cd "$SRC" && npm ci --no-audit --no-fund)
 
 # Scenes of the hero video, in order. Each page follows the render.js contract.
-SCENES=(scene1-opener scene2-race scene3-how scene4-memory endcard)
+SCENES=(3d/opener.html scenes/scene2-race.html scenes/howitworks.html 3d/memory.html scenes/endcard.html)
 
-render_scene() {  # name WxH tag
+render_scene() {  # page WxH out.mp4
   local w=${2%x*} h=${2#*x}
-  node "$SRC/render.js" "$SRC/scenes/$1.html" "$WORK/$1-$3.mp4" --w "$w" --h "$h" --fps 30 --crf 12
+  node "$SRC/render.js" "$SRC/$1" "$3" --w "$w" --h "$h" --fps 30 --crf 12
 }
 
 clip_dur() {  # seconds, from ffmpeg's header line (no ffprobe needed)
@@ -46,19 +47,13 @@ join_clips() {  # out clip...
     -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -movflags +faststart "$out"
 }
 
-# GIF from a clip: 2-pass palette, width $2, fps $3.
-to_gif() {  # in.mp4 width fps out.gif
-  ffmpeg -y -loglevel error -i "$1" -vf "fps=$3,scale=$2:-1:flags=lanczos,palettegen=stats_mode=diff:max_colors=128" "$WORK/pal.png"
-  ffmpeg -y -loglevel error -i "$1" -i "$WORK/pal.png" \
-    -lavfi "fps=$3,scale=$2:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" "$4"
-}
-
 if [ "$WHAT" = all ] || [ "$WHAT" = video ]; then
   for size in 1080x1080:1x1 1920x1080:16x9; do
-    clips=()
+    clips=(); n=0
     for s in "${SCENES[@]}"; do
-      render_scene "$s" "${size%:*}" "${size#*:}"
-      clips+=("$WORK/$s-${size#*:}.mp4")
+      n=$((n + 1))
+      render_scene "$s" "${size%:*}" "$WORK/scene$n-${size#*:}.mp4"
+      clips+=("$WORK/scene$n-${size#*:}.mp4")
     done
     join_clips "$OUT/inkling-launch-${size#*:}.mp4" "${clips[@]}"
     echo "wrote $OUT/inkling-launch-${size#*:}.mp4"
@@ -66,12 +61,22 @@ if [ "$WHAT" = all ] || [ "$WHAT" = video ]; then
 fi
 
 if [ "$WHAT" = all ] || [ "$WHAT" = gifs ]; then
-  for g in race loop memory dspark scheduler; do
-    [ -f "$SRC/scenes/gif-$g.html" ] || { echo "skip $g.gif (no scenes/gif-$g.html)"; continue; }
-    node "$SRC/render.js" "$SRC/scenes/gif-$g.html" "$WORK/gif-$g.mp4" --w 960 --h 540 --fps 30 --crf 12
-    to_gif "$WORK/gif-$g.mp4" 960 15 "$OUT/$g.gif"
-    echo "wrote $OUT/$g.gif ($(du -h "$OUT/$g.gif" | cut -f1))"
-  done
+  # page  render size  fps  out   (render larger than 960 where labels need it; every GIF is scaled to 960 px wide)
+  while read -r page size fps name; do
+    node "$SRC/render.js" "$SRC/$page" "$WORK/$name.mp4" --w "${size%x*}" --h "${size#*x}" --fps "$fps" --crf 4
+    ffmpeg -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
+    echo "wrote $OUT/$name.gif ($(du -h "$OUT/$name.gif" | cut -f1))"
+  done <<'GIFS'
+scenes/gif-race.html 960x540 30 race
+3d/opener.html?gif=1 1280x720 15 loop
+3d/memory.html?gif=1 1280x720 15 memory
+gifs/dspark.html 960x540 20 dspark
+gifs/scheduler.html 960x540 20 scheduler
+GIFS
+fi
+
+if [ "$WHAT" = all ] || [ "$WHAT" = diagrams ]; then
+  (cd "$SRC" && node diagrams/export-svg.js "$OUT")
 fi
 
 [ "$OWN_WORK" = 1 ] && rm -rf -- "${WORK:?}"
