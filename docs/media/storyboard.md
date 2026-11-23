@@ -61,7 +61,8 @@ Where we lose (must appear somewhere in the video): SGLang serves 4 concurrent r
 ## Hero video (1080 × 1080, ~23.7 s; 16:9 cut 1920 × 1080 with the same timing)
 
 Each scene is rendered at both sizes, 30 fps, exact duration, as `scene-<n>-<1x1|16x9>.mp4`
-(H.264, CRF 12, yuv420p), with its sources under `docs/media/src/`. `src/render.sh` joins them with 0.4 s cross-fades.
+(H.264, CRF 12, yuv420p), with its sources under `docs/media/src/`. `src/render.sh` joins them with 0.4 s cross-fades. A scene's first frame must not be empty (the cross-fade
+would dip to black): show its caps label and headline from frame 0 and build the rest after.
 
 ### Scene 1: opener, 0.0-6.0 s
 
