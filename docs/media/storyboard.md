@@ -40,8 +40,9 @@ measured 2026-11-22):
 | GSM8K, n = 200 | 0.825 | 0.830 | 0.845 | 0.840 |
 | peak GPU (GiB) | 28.7 | 28.5 | 31.4 | 32.2 |
 
-Ratios used on screen: 363 / 241 = **1.5×** faster than SGLang (and 363 / 242 = 1.5× vs vLLM); 280 / 241 = **1.16×**
-in default bf16.
+No ratio is used as a headline. The published `--dense-fp8` 363 tok/s did not reproduce in two re-runs of the same
+benchmark (315-349 tok/s, SGLang and vLLM reproduced); the race shows its own measured ratio with that run's
+6-prompt average beside it.
 
 Model facts (`docs/architecture.md`): 26.4B parameters, 3.4B active per token; 24 stored layers = prelude 6
 (0-5) + loop core 12 (6-17) × 3 passes + coda 6 (18-23) = **48 layer visits per token**; 128 routed experts,
@@ -87,13 +88,13 @@ Each card: a progress bar filling with the real token timestamps, a live timer a
 answer text streaming in, a green ✓ correct pill when the final answer matches the key. Played at 1× from the
 captured per-token times (one greedy run per engine, same token-id prompt, same `max_tokens`, DSpark on for all,
 the `bench/serve_bench.py` server flags). Pick a GSM8K test question whose answers are correct for all three and
-that runs 2-5 s on the slowest engine. Never smooth or rescale the curves.
+that runs 1-5 s on the slowest engine. Never smooth or rescale the curves.
 
-Punchline (computed from the captured run, not from the table): `Same answer, N× sooner.` Footer line, small:
-`RTX PRO 6000 (the RTX 5090's GB202 chip), 32 GB budget per engine. Averages over 6 prompts: 363 vs 241 / 242 tok/s.`
+Punchline (computed from the captured run, not from the table): `Same answer, N× sooner than SGLang.`, with one
+small line under it giving the same run's 6-prompt average ratio. Footer line, small: `RTX PRO 6000 (the RTX 5090's
+GB202 chip), 32 GB budget per engine, greedy, DSpark on all three.`
 
-If the race run's ratio differs a lot from 1.5×, pick another question rather than a different number on the end
-card; show the question's own ratio in the race and the 6-prompt average on the end card.
+The race question and its selection rule are documented in the race scene's source.
 
 ### Scene 3: how it works, 14.0-20.0 s
 
@@ -117,9 +118,9 @@ graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into 
 ### Scene 5: end card, 23.0-26.5 s
 
 - Kicker: `INKLING-2-MINI · ONE 32 GB GPU`
-- Headline: `Decode 1.5× faster than SGLang and vLLM.`
+- Headline: `Faster single-request decode than SGLang and vLLM.` (no ratio: re-runs of the 6-prompt benchmark measured 315-349 tok/s for `--dense-fp8`, below the published 363)
 - Three zero-based bars growing in: this engine 363, SGLang 241, vLLM 242 tok/s (beside the text in 16:9)
-- Context: `Single-request greedy decode with --dense-fp8, same GPU, same 32 GB budget. 280 tok/s in default bf16. Python and Triton.`
+- Context: `Published 6-prompt greedy averages with --dense-fp8, same GPU, same 32 GB budget. 280 tok/s in default bf16. Python and Triton.`
 - URL: `github.com/amw720386/inkling-2-mini-inference`
 - Bottom: `MADE AT MAGNI`
 

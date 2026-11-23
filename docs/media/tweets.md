@@ -9,8 +9,8 @@ post.
 
 We built an inference engine for Inkling-2-Mini, the 26B looped MoE, that fits on one 32 GB GPU.
 
-Single-request decode: 363 tok/s, vs 241 for SGLang and 242 for vLLM on the same GPU and the same 32 GB budget.
-1.5× faster.
+Single-request decode: 363 tok/s in our published runs, vs 241 for SGLang and 242 for vLLM on the same GPU and the
+same 32 GB budget.
 
 Python + Triton, open source. Video below.
 
@@ -45,7 +45,7 @@ All numbers are from an RTX PRO 6000, which has the RTX 5090's chip. Real 5090 r
 
 ## Single post
 
-Inkling-2-Mini (26B looped MoE) on one 32 GB GPU: 363 tok/s single-request decode, 1.5× SGLang and vLLM on the
-same card and budget. Fused Triton kernels, one CUDA graph per step, DSpark speculation. Open source. Video below.
+Inkling-2-Mini (26B looped MoE) on one 32 GB GPU: faster single-request decode than SGLang and vLLM on the
+same card and budget (363 vs 241 / 242 tok/s published). Fused Triton kernels, one CUDA graph per step, DSpark speculation. Open source. Video below.
 
 github.com/amw720386/inkling-2-mini-inference

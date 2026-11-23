@@ -23,27 +23,27 @@
        color: var(--body); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .row.us .v { color: var(--blue-glow); }
   .v small { font: 400 calc(var(--s) * 11px) var(--mono); letter-spacing: .15em; color: var(--muted); margin-left: .5em; }
-  .wide #head { max-width: 11em; }
+  .wide #head { max-width: 13em; }
   .wide #ctx { max-width: 24em; }
   .label { font-size: calc(var(--s) * 15px); }
 </style></head>
 <body>
 <div id="wrap">
   <div id="kicker" class="label">Inkling-2-Mini · one 32 GB GPU</div>
-  <div id="head">Decode <b>1.5×</b> faster than SGLang and vLLM.</div>
+  <div id="head">Faster single-request decode than SGLang and&nbsp;vLLM.</div>
   <div id="stats">
     <div class="row us"><div class="l label">This engine</div><div class="track"><div class="bar" data-v="363.1"></div><div class="v">363<small>TOK/S</small></div></div></div>
     <div class="row"><div class="l label">SGLang</div><div class="track"><div class="bar" data-v="240.9"></div><div class="v">241<small>TOK/S</small></div></div></div>
     <div class="row"><div class="l label">vLLM</div><div class="track"><div class="bar" data-v="241.6"></div><div class="v">242<small>TOK/S</small></div></div></div>
   </div>
-  <div id="ctx">Single-request greedy decode with <span style="font-family:var(--mono);font-size:.9em">--dense-fp8</span>, same GPU, same 32&nbsp;GB budget. 280 tok/s in default bf16. Python and Triton.</div>
+  <div id="ctx">Published 6-prompt greedy averages with <span style="font-family:var(--mono);font-size:.9em;white-space:nowrap">--dense-fp8</span>, same GPU, same 32&nbsp;GB budget. 280&nbsp;tok/s in default bf16. Python and Triton.</div>
   <div id="url">github.com/amw720386/inkling-2-mini-inference</div>
   <div id="magni" class="label">Made at Magni</div>
 </div>
 <script src="../lib/scene.js"></script>
 <script>
   // Numbers: results/serve_ours-fp8.json 363.1, serve_sglang.json 240.9, serve_vllm.json 241.6, serve_ours.json 279.9
-  // (decode_greedy.overall_tok_s). 363.1 / 240.9 = 1.51.
+  // (decode_greedy.overall_tok_s). No ratio in the headline: re-runs of the 6-prompt bench measured 315-349 tok/s for --dense-fp8.
   if (S.wide) document.body.classList.add('wide');
   const els = ['#kicker', '#head', '#stats', '#ctx', '#url', '#magni'].map(S.$);
   const starts = [0.45, 0.6, 0.95, 1.25, 1.55, 1.85];
