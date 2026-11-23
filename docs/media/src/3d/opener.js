@@ -10,6 +10,11 @@ import { setup, rng, textLabel, glowTexture, fitCamera, lerp, COLORS } from './c
 await document.fonts.load('400 64px JBMono');
 // ?gif=1: the README loop (fixed wide camera, one caption, everything fades back to idle so the loop is seamless)
 const GIF = new URLSearchParams(location.search).get('gif') === '1';
+// ?tex=data: tile texture from the real checkpoint (expert-atlas.png, built by build_expert_atlas.py: each tile shows
+// that expert's w13 block scales in that layer); otherwise a procedural texture. Nothing else changes.
+const DATA_TEX = new URLSearchParams(location.search).get('tex') === 'data';
+const atlas = DATA_TEX ? await new THREE.TextureLoader().loadAsync('expert-atlas.png') : null;
+if (atlas) { atlas.magFilter = THREE.NearestFilter; atlas.minFilter = THREE.LinearMipmapLinearFilter; atlas.colorSpace = THREE.NoColorSpace }
 const DURATION = GIF ? 6.6 : 6.0;
 const { W, H, ramp } = window.S;
 const wide = W / H > 1.3;
@@ -75,7 +80,7 @@ intTex.magFilter = intTex.minFilter = THREE.NearestFilter;
 
 const planeVS = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`;
 const planeFS = `
-  uniform sampler2D uInt; uniform float uLayer, uPulse, uDim, uLoop;
+  uniform sampler2D uInt, uAtlas; uniform float uLayer, uPulse, uDim, uLoop, uData;
   varying vec2 vUv;
   float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   void main(){
@@ -89,6 +94,9 @@ const planeFS = `
     float rowN = hash(vec2(floor(f.y * 22.0), id.x * 13.0 + id.y * 7.0 + uLayer * 31.0));
     float run = hash(vec2(floor(f.x * (6.0 + 18.0 * rowN)), floor(f.y * 22.0) + id.y * 3.0 + uLayer));
     float tex = 0.35 + 0.65 * run * (0.6 + 0.4 * rowN);
+    // real data: atlas row block = layer, column block = expert, top row first
+    float d = texture2D(uAtlas, vec2((e + f.x) / 128.0, 1.0 - (uLayer + 1.0 - f.y) / 24.0)).r;
+    tex = mix(tex, 0.30 + 0.70 * d, uData);
     vec3 idle = mix(vec3(0.07, 0.08, 0.10), vec3(0.21, 0.23, 0.27), tex);
     idle = mix(idle, idle * vec3(1.05, 0.98, 0.9), uLoop * 0.35);
     vec3 hot = mix(vec3(0.14, 0.38, 0.92), vec3(0.30, 0.56, 1.0), tex);
@@ -105,7 +113,7 @@ const planes = [];
 function makeLayers(dim, mirror) {
   const grp = new THREE.Group();
   for (let l = 0; l < 24; l++) {
-    const u = { uInt: { value: intTex }, uLayer: { value: l }, uPulse: { value: 0 }, uDim: { value: dim }, uLoop: { value: l >= 6 && l <= 17 ? 1 : 0 } };
+    const u = { uInt: { value: intTex }, uAtlas: { value: atlas || intTex }, uData: { value: atlas ? 1 : 0 }, uLayer: { value: l }, uPulse: { value: 0 }, uDim: { value: dim }, uLoop: { value: l >= 6 && l <= 17 ? 1 : 0 } };
     const m = new THREE.Mesh(planeGeo, new THREE.ShaderMaterial({ uniforms: u, vertexShader: planeVS, fragmentShader: planeFS, side: THREE.DoubleSide }));
     const card = new THREE.Mesh(cardGeo, new THREE.MeshBasicMaterial({ color: 0x0a111c, side: THREE.DoubleSide }));
     card.position.set(0, 0, -0.004);
