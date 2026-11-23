@@ -17,7 +17,7 @@ autotunes instead, which takes several minutes. Triton caches the results. Later
 | Streaming | SSE, with a usage chunk at the end |
 | Reasoning | split into `reasoning_content`; `reasoning_effort` is passed to the chat template |
 | Tools | OpenAI tool calling (`tools`, `tool_calls`, tool results) |
-| Images | `image_url` content parts (URL or base64) |
+| Images | `image_url` content parts (base64, or an http(s) URL of a public host; `INKLING_LOCAL_IMAGES=1` also allows private addresses) |
 | Sampling | `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty` |
 | Defaults | requests without a `temperature` use the checkpoint's `generation_config.json` (sampling at 1.0, as SGLang does); `--default-temperature 0` makes greedy the default |
 | Other | `stop`, `logprobs` / `top_logprobs`, `response_format` (JSON object or JSON schema, through xgrammar), `max_tokens` / `max_completion_tokens`, `ignore_eos` |
@@ -45,6 +45,7 @@ step's logits. Logprobs are the model's distribution before temperature and top-
 
 | Flag | Effect |
 |---|---|
+| `--host A` | address to listen on (default 127.0.0.1; 0.0.0.0 accepts other machines, and there is no login) |
 | `--slots N` | concurrent requests (default 4) |
 | `--max-ctx N` | context per slot (default 32768) |
 | `--dense-fp8` / `--no-dense-fp8` | on by default: row-scaled FP8 copies of the attention projections and LM head, FP8 GEMMs for their prefill. Faster decode and prefill; not bit-faithful to the bf16 checkpoint ([quality](benchmarks.md#quality)) |
