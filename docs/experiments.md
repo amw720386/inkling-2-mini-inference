@@ -1,6 +1,6 @@
 # Optimization log
 
-What changed the numbers, and what was tried and dropped. Timings are from the RTX PRO 6000 proxy; the scripts
+What changed the numbers, and what was tried and dropped. Timings are from the RTX PRO 6000; the scripts
 are in `bench/` and `bench/experiments/`. Each section lists changes in the order they landed.
 
 ## Kept
@@ -94,3 +94,7 @@ to 2.7 KB per thread (2.3 GiB). `bench/experiments/first_start_mem.py` shows it 
 | Router with 1 warp, message gate with 2 warps | Faster, but another reduction order flips near-tied experts and changes the outputs compared against SGLang's |
 | Verify widths 3 and 6 | Within noise of 2, 4, 8 |
 | Drafter shortlist of 16k / 64k tokens | 16k loses acceptance; 64k is within noise of 32k |
+| Drafting only the 3 tokens a width-4 batched round uses | 613 / 614 / 614 → 610 / 616 / 615 tok/s at 4 requests (about +0.35% in matched runs) |
+| Retrying speculation after plain batched steps (which never update the acceptance average) | 611 / 615 → 607-611 tok/s at 4 requests; nothing at 2 |
+| Broader drafter shortlists (Wikipedia text of 12 other languages mixed in; `build_shortlist.py mix`) | Non-English acceptance +0.011 to +0.025, but 32k and 48k mixes lose elsewhere, and 64k loses 0.005 on maths and long context; the current list lengthened to 48k gains 0.014 non-English and loses nothing (`bench/experiments/draft_gate0.py`; throughput not measured) |
+| Fine-tuning the drafter | Not attempted: FP8 and FP4 prefill cost no draft acceptance (paired difference under 0.002), so there is no numerics loss to train away |
