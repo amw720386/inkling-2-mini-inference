@@ -67,13 +67,15 @@ def main():
     # the same 6 decode-benchmark prompts, re-measured in this capture (mean of the two repeats)
     b6 = {k: sum(v["overall_tok_s_reps"]) / len(v["overall_tok_s_reps"]) for k, v in cap["bench6"].items()}
     ours_k = next(k for k in b6 if k.startswith("ours"))
-    b6_ratio = b6[ours_k] / max(v for k, v in b6.items() if k != ours_k)
+    b6_base = max((k for k in b6 if k != ours_k), key=lambda k: b6[k])
+    b6_ratio = b6[ours_k] / b6[b6_base]
+    b6_name = next(e["name"] for e in cap["engines"] if e["key"] == b6_base).split(" ")[0]
     data = {
         "layout": cap["layout"],
         "headline": cap["headline"],
         "question": cap["question"],
         "punchline": f"Same answer, {ratio:.1f}× sooner than {fastest['name']}.",
-        "punchsub": f"This question. Across the 6 benchmark prompts in this run: {b6_ratio:.2f}×.",
+        "punchsub": f"This question. 6-prompt average in this run: {b6_ratio:.2f}× vs the faster baseline ({b6_name}).",
         "footer": [f"Answer key: {cap['label']} · request sent to last token · greedy · DSpark on all three",
                    "RTX PRO 6000 (the RTX 5090's GB202 chip), 32 GB budget per engine"],
         "engines": engines,

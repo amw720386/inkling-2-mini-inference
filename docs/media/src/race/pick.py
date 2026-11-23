@@ -147,7 +147,7 @@ def main():
                         "answer_start": best["starts"][k], "gpu": raws[k].get("gpu"), "startup_s": raws[k].get("startup_s")})
     out = {"question_id": best["id"], "question": p["question"], "label": p["label"], "prompt_ids": p["input_ids"],
            "headline": "One GSM8K question. Three engines.",
-           "layout": {"t0": 1.2, "duration": 8.0, "punch_delay": 0.3, "gif_duration": 6.5},
+           "layout": {"t0": 1.0, "duration": 6.8, "punch_delay": 0.2, "gif_duration": 6.8},
            "rule": __doc__.split("\n\n", 2)[1].strip(), "rep": REP, "target_ratio": round(target, 3), "target_from": a.target, "strict": a.strict,
            "selection_note": None if a.strict else (
                "Rule 3 was relaxed to this form after the capture was seen: the strict form (all three engines within 5% "

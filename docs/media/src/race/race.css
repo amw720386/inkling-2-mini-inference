@@ -74,3 +74,4 @@
   .wide .bar, .wide .top, .wide .meta, .wide .pill { flex-shrink: 0; }
   .wide .textrow, .wide .stream { min-height: 0; overflow: hidden; }
   .wide:not(.gif) .card { height: calc(580px * var(--s)); }
+  .gif #punchsub { font-size: calc(24px * var(--s)); margin-bottom: calc(10px * var(--s)); }
