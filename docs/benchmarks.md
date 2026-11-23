@@ -22,7 +22,8 @@ this has been measured on a 5090.
 The number after each name is how many containers the medians cover. Not every container ran every section.
 
 Each server ran on its own Modal container with the same GPU and a 32 GB budget: our process cap, SGLang's
-`--mem-fraction-static 0.232` (its RTX 5090 recipe value) and vLLM's `--gpu-memory-utilization 0.33`. The client
+`--mem-fraction-static 0.232` (chosen here so that `nvidia-smi` stays under 32 GB) and vLLM's
+`--gpu-memory-utilization 0.33`. The client
 (`bench/serve_bench.py`) sends token-id prompts to `/v1/completions`, so tokenization and chat templates cannot
 differ. Measured 2026-11-23: SGLang `lmsysorg/sglang:inkling-2-mini`, vLLM 0.34.0rc1 nightly, this engine with
 torch 2.9.1 and Triton 3.6. Raw files: `results/serve_*.json`, one per container; the table is their median
@@ -119,6 +120,8 @@ python tools/plot_comparison.py                           # docs/img/comparison.
 modal run modal/engine_app.py::parity --args "bench_spec.py 256"
 ```
 
-SGLang runs the `lmsysorg/sglang:inkling-2-mini` image with its RTX 5090 DSpark recipe. vLLM runs the
+SGLang runs the `lmsysorg/sglang:inkling-2-mini` image with its DSpark recipe. The cookbook's RTX PRO 6000 and RTX 5090
+recipes share these flags; this run adds the 32k context of the RTX 5090 one and the memory cap, and leaves out the
+multimodal, grammar and tool-parser flags. vLLM runs the
 `vllm/vllm-openai:nightly` image with its Inkling-2-Mini recipe. The exact flags are in `modal/serve_bench.py`.
 Raw results are in `results/`; `results/sglang/` holds the earlier SGLang cookbook runs.
