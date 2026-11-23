@@ -16,8 +16,9 @@ CHROME_LIBS = ("libnss3 libatk-bridge2.0-0 libatk1.0-0 libgbm1 libasound2 libxkb
                "libxrandr2 libxfixes3 libcups2 libpango-1.0-0 libcairo2 libdrm2 libdbus-1-3").split()
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "nodejs", "npm", "ca-certificates", *CHROME_LIBS)
-    .run_commands("npx --yes @puppeteer/browsers install chrome-headless-shell@stable --path /root/.cache/chs")
+    .apt_install("ffmpeg", "nodejs", "npm", "ca-certificates", "unzip", *CHROME_LIBS)  # unzip: the Chrome download is a zip
+    # pinned: the committed renders were made with this Chrome, so re-renders reproduce them
+    .run_commands("npx --yes @puppeteer/browsers install chrome-headless-shell@158.0.8127.36 --path /root/.cache/chs")
     .add_local_dir(str(HERE), "/root/src", ignore=["node_modules", "__pycache__"])
 )
 app = modal.App("inkling2-media-render")

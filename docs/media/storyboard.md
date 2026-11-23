@@ -47,7 +47,10 @@ Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before re
   24.9 / 27.1 GiB, `tests/gpu/memcheck.py`; FP8 weight sizes computed in `src/3d/memory.js` and `src/diagrams/diagrams.js`).
   The launch mp4s get the new scene 4 with the video re-render above.
 - Done: `scheduler.gif` dropped (its idle-GPU claim was wrong: a trace shows the GPU busy 91-94% of the time).
-- `render_modal.py` is meant to run `render.sh` on a Modal container. It has not been run yet.
+- `render_modal.py` runs `render.sh` on a Modal CPU container (fixed: `unzip` for the Chrome download; Chrome pinned to
+  158.0.8127.36, the build the committed renders used). `--what diagrams` reproduces all 8 SVGs byte for byte and
+  `--stills 3d/memory.html` matches the committed scene pixel for pixel. A full `all` run has not been timed; one
+  16-CPU container with SwiftShader may need more than its 3600 s timeout for both video sizes.
 
 Model facts (`docs/architecture.md`): 26.4B parameters, 3.4B active per token; 24 stored layers = prelude 6
 (0-5) + loop core 12 (6-17) × 3 passes + coda 6 (18-23) = **48 layer visits per token**; 128 routed experts,
