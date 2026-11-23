@@ -10,6 +10,7 @@ Chat output is split into `reasoning_content` (the model's thinking section) and
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import threading
 import time
@@ -135,6 +136,34 @@ def has_images(messages) -> bool:
                                                           for p in m["content"]) for m in messages)
 
 
+MAX_IMAGE_BYTES = 32 << 20
+# IPv6 ranges that carry an IPv4 address inside (NAT64, 6to4, Teredo): public-looking, but can reach private hosts
+_EMBEDDING_NETS = [ipaddress.ip_network(n) for n in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32")]
+
+
+def check_image_url(url: str):
+    """http(s) URLs of public hosts only: no file:// reads, no requests to this machine or its network.
+    INKLING_LOCAL_IMAGES=1 allows private addresses. The address is checked when the URL is opened, so a host whose
+    DNS changes between the check and the request could still get through: do not expose the server to untrusted clients."""
+    import os
+    import socket
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("image_url must be a data: or http(s) URL")
+    if os.environ.get("INKLING_LOCAL_IMAGES") == "1":
+        return
+    try:
+        addrs = {i[4][0] for i in socket.getaddrinfo(u.hostname, None)}
+    except OSError as e:
+        raise ValueError(f"image_url host not found: {u.hostname}") from e
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split("%")[0])
+        if not ip.is_global or ip.is_multicast or any(ip in n for n in _EMBEDDING_NETS if n.version == ip.version):
+            raise ValueError("image_url points to a private address")
+
+
 def _load_image(src: str):
     import base64
     import io
@@ -146,8 +175,17 @@ def _load_image(src: str):
     else:
         import urllib.request
 
-        with urllib.request.urlopen(src, timeout=30) as f:
-            data = f.read()
+        class Redirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                check_image_url(newurl)
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        check_image_url(src)
+        # no proxies: an environment proxy would fetch the URL itself, without the address check
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), Redirect).open(src, timeout=30) as f:
+            data = f.read(MAX_IMAGE_BYTES + 1)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"image larger than {MAX_IMAGE_BYTES >> 20} MB")
     return Image.open(io.BytesIO(data)).convert("RGB")
 
 
@@ -428,9 +466,12 @@ def build_app(server: Server):
     async def chat(req: Request):
         body = await req.json()
         try:
+            if has_images(body.get("messages") or []):  # fetch off the event loop, with a total deadline
+                body["messages"] = await asyncio.wait_for(asyncio.to_thread(load_images, body["messages"]), 60)
             ids, feats = server.chat_ids(body)
-        except ValueError as e:
-            return JSONResponse({"error": {"message": str(e), "type": "invalid_request_error"}}, status_code=400)
+        except (ValueError, OSError, asyncio.TimeoutError) as e:  # OSError: unreachable URL or not an image
+            return JSONResponse({"error": {"message": str(e) or "image fetch timed out",
+                                           "type": "invalid_request_error"}}, status_code=400)
         return await respond(ids, body, chat=True, image_feats=feats)
 
     @app.post("/v1/completions")
@@ -523,7 +564,7 @@ def build_app(server: Server):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to accept other machines (there is no login)")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--max-ctx", type=int, default=32768)
     ap.add_argument("--slots", type=int, default=4, help="concurrent requests (batched decode)")
