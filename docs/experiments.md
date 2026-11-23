@@ -60,6 +60,17 @@ times.
 | `--fp4-prefill`: NVFP4 activations and `tl.dot_scaled` e2m1 × e2m1 for the NVFP4 experts (needs Triton 3.6) | Per layer, 8k tokens 7.95 → 2.07 ms |
 | `--dense-fp8` prefill: FP8 tensor-core GEMMs for the projections | Projection GEMMs ~110 → 44 ms |
 
+### First start
+
+| Change | Effect |
+|---|---|
+| Configs of the autotuned kernels pinned for sm_120 (`ops/tuned.py`); other GPUs and shapes still autotune | First start with an empty Triton cache 481 → 69 s; every reachable shape of the default, bf16 and 256k profiles is pinned (214 lookups, none tuned) and the choices no longer vary between runs |
+| Configs that spill more than 64 bytes of registers per thread are skipped by the autotuner without being launched | Device memory of a first start, empty cache, 31.0 GiB free: 31.34 → 28.45 GiB (default), 31.54 → 28.63 (bf16), the same as with a warm cache; before, the default profile ran out of memory (`tests/gpu/fit_5090.py`) |
+
+The extra memory was not unloaded modules (about 950 modules add under 50 MiB): the driver sizes its local-memory pool for
+the largest register spill it has launched, per thread on the whole GPU, and keeps it. Losing attention configs spilled up
+to 2.7 KB per thread (2.3 GiB). `bench/experiments/first_start_mem.py` shows it per config.
+
 ## Dropped
 
 | Idea | Result |

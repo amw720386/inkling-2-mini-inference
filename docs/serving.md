@@ -5,8 +5,9 @@ python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000
 ```
 
 This starts an OpenAI-compatible server with 4 concurrent slots, 32k context, DSpark, FP8 dense weights, FP4 prefill
-and image input enabled. `--no-dense-fp8 --no-fp4-prefill` gives the bf16 checkpoint math instead. The first start compiles and autotunes the Triton kernels, which takes a few minutes; Triton caches the results. Later
-starts take under a minute.
+and image input enabled. `--no-dense-fp8 --no-fp4-prefill` gives the bf16 checkpoint math instead. The first start compiles the Triton kernels, which takes
+about a minute: their configs are pinned for sm_120 (`inkling_engine/ops/tuned.py`). `INKLING_AUTOTUNE=1` ignores the pins and
+autotunes instead, which takes several minutes. Triton caches the results. Later starts take under a minute.
 
 ## API
 
