@@ -45,8 +45,12 @@ image = image.pip_install(f"triton=={os.environ.get('INKLING_TRITON', '3.6.0')}"
 image = (
     image.env({"TRITON_CACHE_DIR": "/cache/triton", "PYTHONUNBUFFERED": "1"})
     .add_local_python_source("inkling_engine", ignore=["**/__pycache__", "**/*.pyc"])  # also data/ files
-    .add_local_dir("tests", "/root/tests")
+    .add_local_dir("tests", "/root/tests", ignore=["**/__pycache__"])
+    .add_local_dir("bench", "/root/bench", ignore=["**/__pycache__"])
+    .add_local_dir("tools", "/root/tools", ignore=["**/__pycache__"])
 )
+# `parity` looks scripts up by file name in these folders
+SCRIPT_DIRS = ["/root/tests/gpu", "/root/bench", "/root/bench/experiments", "/root/tools"]
 
 app = modal.App("inkling2-engine", image=image)
 GPU = "RTX-PRO-6000"
@@ -65,7 +69,8 @@ def run_parity(args: list[str]):
         k, v = args[0].split("=", 1)
         env[k] = v
         args = args[1:]
-    script = "/root/tests/gpu/" + (args[0].split("/")[-1] if args and args[0].endswith(".py") else "parity.py")
+    name = args[0].split("/")[-1] if args and args[0].endswith(".py") else "parity.py"
+    script = next((f"{d}/{name}" for d in SCRIPT_DIRS if os.path.exists(f"{d}/{name}")), f"/root/tests/gpu/{name}")
     rest = args[1:] if args and args[0].endswith(".py") else args
     return subprocess.call([sys.executable, script, WEIGHTS, *rest], env=env)
 

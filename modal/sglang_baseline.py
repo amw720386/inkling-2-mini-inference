@@ -431,7 +431,7 @@ def run(mode: str, config: str, mem_frac: float):
 
 @app.local_entrypoint()
 def main(mode: str = "probe", config: str = "balanced", mem_frac: float = 0.26):
-    out_dir = pathlib.Path(__file__).resolve().parent.parent / "bench" / "raw"
+    out_dir = pathlib.Path(__file__).resolve().parent.parent / "results" / "sglang"
     out_dir.mkdir(parents=True, exist_ok=True)
     res = run.remote(mode, config, mem_frac)
     ref = res.get("reference")

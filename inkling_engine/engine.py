@@ -508,7 +508,7 @@ class Engine:
         return out
 
     # sampled requests draft at temperature * scale; acceptance stays exact for any scale > 0. 0.8 measured best
-    # at temperature 1 (tests/gpu/bench_draft_temp.py: +2-4% tok/s over 1.0; 0.7 and below lose)
+    # at temperature 1 (bench/experiments/bench_draft_temp.py: +2-4% tok/s over 1.0; 0.7 and below lose)
     draft_temp_scale = 0.8
 
     def _draft_temp(self, sp: Sampling) -> float:

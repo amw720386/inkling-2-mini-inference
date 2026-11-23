@@ -39,7 +39,7 @@ EPS = 1e-6
 CANDIDATES = 1024
 # The base logits that pick each row's candidates are scored over a shortlist of the most frequent tokens (plus the
 # special tokens) instead of the whole vocabulary: data/draft_shortlist.bin ranks token ids by frequency in code and
-# English text (tests/gpu/build_shortlist.py; the idea is ingine's). 0 = the whole vocabulary.
+# English text (tools/build_shortlist.py; the idea is ingine's). 0 = the whole vocabulary.
 SHORTLIST = int(os.environ.get("INKLING_DRAFT_SHORTLIST", "32768"))
 SPECIAL_FROM = 199998  # Inkling's special tokens (chat markers, eos, pad) sit at the top of the vocabulary
 

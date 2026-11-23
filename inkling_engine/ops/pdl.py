@@ -7,7 +7,7 @@ can launch two steps ahead (a trigger before the wait cascaded: successors occup
 6.81 ms). The weight-streaming GEMVs use the head start: before waiting they issue L2 prefetches for the first
 1 KiB of each of their weight rows (`prefetch_rows_l2`), which do not depend on the predecessor; small single-program
 kernels (norms, depth attention, routing) leave most of the GPU idle, so that DRAM traffic overlaps them.
-In-process A/B/A (tests/gpu/bench_pdl.py, RTX PRO 6000 proxy): decode step 6.08 -> 5.91 ms, verify(8) 8.68 -> 8.27.
+In-process A/B/A (bench/bench_pdl.py, RTX PRO 6000 proxy): decode step 6.08 -> 5.91 ms, verify(8) 8.68 -> 8.27.
 A kernel launched without the PDL attribute behaves as before (wait and trigger are no-ops).
 `enable(kernel)` makes every launch of a JIT kernel (also through an autotuner) pass launch_pdl=True.
 """
