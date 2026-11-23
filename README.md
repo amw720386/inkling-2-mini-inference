@@ -4,6 +4,13 @@
 [![Model: Inkling-2-Mini](https://img.shields.io/badge/model-Inkling--2--Mini-6f42c1.svg)](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 [![GPU: RTX 5090 (sm_120)](https://img.shields.io/badge/GPU-RTX%205090%20(sm__120)-76b900.svg)](docs/benchmarks.md)
 
+<p align="center">
+  <a href="docs/media/inkling-launch-16x9.mp4"><img src="docs/media/race.gif" width="900"
+     alt="Real run, played at 1x: this engine, SGLang and vLLM decode the same prompt on one RTX PRO 6000"></a>
+  <br><sub>Real run on one RTX PRO 6000, played at 1×. <a href="docs/media/inkling-launch-16x9.mp4">Watch the launch video</a>
+  (<a href="docs/media/inkling-launch-1x1.mp4">square cut</a>).</sub>
+</p>
+
 We're building a single-GPU inference engine for
 [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini), the 26B-parameter looped MoE from Thinking
 Machines (3.4B active per token), for one 32 GB RTX 5090. It is Python and Triton on PyTorch, with an
@@ -18,6 +25,9 @@ follows SGLang's implementation.
   - greedy: 280 vs 241 / 242 tok/s, or 363 with `--dense-fp8`
   - temperature 1: 262 vs 201 / 206 tok/s
 - **More context in 32 GB:** four slots of 32k tokens each, and 256k on one card with an FP8 cache.
+
+  <img src="docs/media/memory.gif" width="720" alt="The 32 GB budget: weights, four 32k KV slots, CUDA graphs; then one 256k FP8 slot">
+
 - **GSM8K** is within noise of both (0.825-0.835 vs 0.840 / 0.845, n = 200).
 
 **Behind:**
@@ -25,6 +35,9 @@ follows SGLang's implementation.
 - **4 concurrent requests:** SGLang is about 15% faster (545 vs 454-474 tok/s), and our throughput dips from 2 to
   4 requests. The cause is the scheduler: it leaves the GPU idle about a third of each 4-request step while Python
   bookkeeping runs (`bench/experiments/sched_breakdown.py`). We're moving that work off the GPU's critical path.
+
+  <img src="docs/media/scheduler.gif" width="720" alt="Schematic of one 4-request scheduler step: the GPU idles about a third of it while Python bookkeeping runs">
+
 - **Default prefill** is slower than SGLang beyond 4k tokens, because it keeps the checkpoint's bf16 math for the
   expert inputs. `--fp4-prefill` quantizes them to FP4 the way SGLang and vLLM do, and is faster than both.
 - **Measured on an RTX PRO 6000**, which has the RTX 5090's chip; real 5090 runs are next. GeForce cards run bf16
@@ -51,6 +64,24 @@ Details:
 - [docs/experiments.md](docs/experiments.md): what changed the numbers, and what was tried and dropped
 - [docs/related-work.md](docs/related-work.md): other Inkling-2-Mini engines and what this one borrows
 - [results/](results/): the raw result files behind the tables
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/media/decode-step-light.svg">
+  <img src="docs/media/decode-step-dark.svg" alt="One decode step: prelude, three passes of the loop core, coda; 8 of 128 experts per visit; DSpark drafts and verify">
+</picture>
+
+Every token makes 48 layer visits (prelude, the loop core three times, coda), and each visit runs 8 of 128 experts.
+Each visit is about 12 fused Triton kernels, and a whole decode step replays as one CUDA graph. DSpark drafts 7
+tokens ahead and the model verifies them in the same kind of graph.
+
+<p align="center">
+  <img src="docs/media/loop.gif" width="440" alt="One token through the looped MoE">
+  <img src="docs/media/dspark.gif" width="440" alt="DSpark: drafts proposed, verified, accepted or rejected">
+</p>
+
+More in [docs/architecture.md](docs/architecture.md).
 
 ## Quick start
 
