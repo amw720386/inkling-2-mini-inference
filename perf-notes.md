@@ -103,6 +103,12 @@ bf16 profile 532.5 / 474.0 tok/s at 4 / 2 concurrent, greedy 325.5, T=1 259.8, T
 66 / 231 / 468 / 1884 ms, GSM8K 0.855; FP8 + FP4 profile 542.6 / 528.5, greedy 385.1, T=1 306.3,
 TTFT 49 / 169 / 352 / 1551 ms, GSM8K 0.84. SGLang: 528-545 / 278-338, greedy 241, T=1 201,
 TTFT 94 / 222 / 432 / 1670.
+Three runs with the new default (serve_ours-default-fp8fp4/-default2/-explicit2): 4 concurrent 540.6 / 533.5 /
+542.6, 2 concurrent 521.7 / 517.7 / 527.5, greedy 324 / 316 / 323, T=1 315 / 301 / 310, TTFT 48 / 168 / 341 / 1415.
+Greedy prompt 0 swings 195-455 tok/s between runs: serve_bench uses ignore_eos and the engine reaches EOS after
+~60 tokens on that prompt, so the rest is post-EOS text whose acceptance depends on the verify widths picked
+(first_request.py: the engine alone gives 417-443 tok/s on it, no first-request stall). Same at 8a23f3d and
+8d7256c, so it is not a regression.
 
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
