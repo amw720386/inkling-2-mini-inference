@@ -12,6 +12,8 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
 - moe_sum for verify-sized steps (T <= 64): grid (T, H/256) instead of one program per token (elementwise
   sum over the 8 rows, so bit-identical). bench_round verify m=2/4/8: 6.91/7.38/8.31 -> 6.72/7.19/8.07 ms;
   bench_spec DSpark 340.4 tok/s (same-day 325.1), round costs 7.43/7.70/8.47 ms, patterns unchanged.
+- Same-day check with the moe_sum change: dense_fp8 plain 209.1 / DSpark 351.3 tok/s (round costs 6.50 / 6.75 /
+  7.43 ms); bench_concurrency 2 requests 387 tok/s, 4 requests 424 (main: 382 / 415).
 
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
@@ -29,3 +31,8 @@ Summation-order noise, not a regression.
 - Prefill profile notes (INKLING_PDL=0; PDL inflates profiled times by the wait): grouped MoE 199 ms of 470,
   attention 82, qkv_post 22, moe_sum 22 (1.35 TB/s on fp32 rows, near the read ceiling), store_kv negligible.
 - Decode GEMVs at 1278-1353 GB/s vs a 1535 GB/s read ceiling (bench_readbw.py).
+- msg_up num_warps 4 -> 2 (bench_msg.py: bit-identical without the norm tail): decode step 5.61 -> 5.46 ms,
+  plain 178.5 tok/s, but the norm launches change bits (plain==sglang 19/64 instead of 9/64). With 2 warps only
+  for norm-free launches the patterns hold but the gain is gone (175.6 tok/s). Reverted.
+- bench_spec run-to-run noise is about +-3% on DSpark (332 vs 340 tok/s, same code); use bench_round graph
+  timings for small changes.
