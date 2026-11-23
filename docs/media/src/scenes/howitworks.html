@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- Scene 3, "how it works" (6.0 s). node render.js scenes/howitworks.html out.mp4 --w 1080 --h 1080 (or 1920x1080).
      Facts: docs/architecture.md ("Decode step", "Speculative decoding (DSpark)"); caveat numbers: results/serve_sglang.json
-     concurrency.4 545, results/serve_ours-fp8.json concurrency.4 474 (docs/benchmarks.md). -->
+     and serve_ours.json, serve_vllm.json concurrency.4, medians over containers (docs/benchmarks.md). -->
 <html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../theme.css">
 <style>
@@ -51,7 +51,7 @@
     <span><i style="background:var(--green)"></i>accepted</span>
     <span><i style="background:var(--red)"></i>rejected</span>
   </div>
-  <div id="caveat">Measured on an RTX PRO 6000 (the RTX 5090’s chip). SGLang still leads at 4 concurrent requests: 545 vs 474 tok/s.</div>
+  <div id="caveat">Measured on an RTX PRO 6000 Blackwell. 4 concurrent requests: 571 tok/s vs 514 (SGLang) and 437 (vLLM).</div>
 </div>
 <script src="../lib/scene.js"></script>
 <script>

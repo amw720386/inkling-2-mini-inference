@@ -1,8 +1,5 @@
 # Media storyboard
 
-> Scenes 3 and 5 of the rendered video, `scheduler.gif` and the numbers below are out of date (the README and
-> `docs/benchmarks.md` have the current ones). Re-render before posting.
-
 The plan for the launch video, the README GIFs and the architecture diagrams. Every number on screen comes from
 `results/` or `docs/`, and the file it comes from is listed next to it. Change a number here first, then in the
 scenes.
@@ -26,26 +23,31 @@ type scale.
 Rules for every frame:
 
 - No internal names, hosts, accounts or paths. "MADE AT MAGNI" appears only on the end card.
-- The proxy caveat (RTX PRO 6000, not an RTX 5090) is on screen in the race and on the how-it-works card.
+- The hardware (RTX PRO 6000 Blackwell) is on screen in the race and on the how-it-works card.
 - Frame-by-frame review before anything is merged: no clipped labels, no overlapping text, no jumps.
 
 ## Numbers (source of truth for every scene)
 
-From `results/serve_*.json` and `docs/benchmarks.md` (RTX PRO 6000 Blackwell on Modal, each engine held to 32 GB,
-measured 2026-11-22):
+From `docs/benchmarks.md` (RTX PRO 6000 Blackwell on Modal, each engine held to 32 GB, medians over containers,
+measured 2026-11-23; regenerate with `tools/results_table.py`):
 
-| | this engine | `--dense-fp8` | SGLang | vLLM 0.34 |
+| | this engine (default) | bf16 | SGLang | vLLM 0.34 |
 |---|---:|---:|---:|---:|
-| decode, greedy, 1 request (tok/s) | 279.9 → **280** | 363.1 → **363** | 240.9 → **241** | 241.6 → **242** |
-| decode, temperature 1 (tok/s) | 262 | 325 | 201 | 206 |
-| TTFT 8k (ms) | 476 | 446 | 432 | does not fit |
-| 4 concurrent (tok/s) | 454 | 474 | **545** | 243 |
-| GSM8K, n = 200 | 0.825 | 0.830 | 0.845 | 0.840 |
-| peak GPU (GiB) | 28.7 | 28.5 | 31.4 | 32.2 |
+| decode, greedy, 1 request (tok/s) | **344** | 273 | 232 | 235 |
+| decode, temperature 1 (tok/s) | 264 | 239 | 192 | 212 |
+| TTFT 8k (ms) | 341 | 467 | 434 | does not fit |
+| 2 / 4 concurrent (tok/s) | 464 / **571** | 437 / 554 | 298 / 514 | 302 / 437 |
+| GSM8K, n = 200 | 0.837 | 0.853 | 0.845 | 0.840 |
 
-No ratio is used as a headline. The published `--dense-fp8` 363 tok/s did not reproduce in two re-runs of the same
-benchmark (315-349 tok/s, SGLang and vLLM reproduced); the race shows its own measured ratio with that run's
-6-prompt average beside it.
+Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before release:
+
+- Re-render the video and `race.gif`. The race data is an earlier engine's `--dense-fp8` run and its tok/s used the
+  old timing; re-capture with `race/capture.py --engines ours,sglang,vllm`, then `pick.py` and `build_race.py`.
+- Memory scene, `memory.gif` and the `memory-layout` diagrams show the bf16 profile. The FP8 default measures
+  25.9 GiB after start, 27.4 GiB peak (`tests/gpu/memcheck.py`); its weights are smaller, so the segments need
+  new sizes.
+- Drop or redraw `scheduler.gif`: its idle-GPU claim is wrong (a trace shows the GPU busy 91-94% of the time).
+- `render_modal.py` is meant to run `render.sh` on a Modal container. It has not been run yet.
 
 Model facts (`docs/architecture.md`): 26.4B parameters, 3.4B active per token; 24 stored layers = prelude 6
 (0-5) + loop core 12 (6-17) × 3 passes + coda 6 (18-23) = **48 layer visits per token**; 128 routed experts,
@@ -84,7 +86,7 @@ times (orange arc on each return), exits the coda. On every visit, 8 of the 128 
 Caps label `DEMO · REAL RUN · ONE RTX PRO 6000 · PLAYED AT 1×`, the prompt as a one-line headline, the prompt
 text small below it. Three cards stacked (1:1) or side by side (16:9):
 
-1. `THIS ENGINE · --dense-fp8` (blue bar)
+1. `THIS ENGINE · default` (blue bar)
 2. `SGLANG` (grey bar)
 3. `vLLM 0.34` (grey bar)
 
@@ -95,8 +97,8 @@ the `bench/serve_bench.py` server flags). Pick a GSM8K test question whose answe
 that runs 1-5 s on the slowest engine. Never smooth or rescale the curves.
 
 Punchline (computed from the captured run, not from the table): `Same answer, N× sooner than SGLang.`, with one
-small line under it giving the same run's 6-prompt average ratio. Footer line, small: `RTX PRO 6000 (the RTX 5090's
-GB202 chip), 32 GB budget per engine, greedy, DSpark on all three.`
+small line under it giving the same run's 6-prompt average ratio. Footer line, small: `RTX PRO 6000 Blackwell,
+32 GB budget per engine, greedy, DSpark on all three.`
 
 The race question and its selection rule are documented in the race scene's source.
 
@@ -110,8 +112,8 @@ Three boxes joined by arrows, each with a caps label, a two-line body and a smal
 2. `LOOPED TARGET` / "48 layer visits, ~12 fused Triton kernels each, one graph replay" / glyph: 3 rows of tiles, 8 of 128 lit blue
 3. `VERIFY` / "keeps the longest matching prefix; width 2, 4 or 8 per round" / glyph: tiles green then one red
 
-Legend line: `■ active expert  ■ draft token  ■ accepted`. Caveat, one line: `Measured on an RTX PRO 6000 (the RTX
-5090's chip). SGLang still leads at 4 concurrent requests: 545 vs 474 tok/s.`
+Legend line: `■ active expert  ■ draft token  ■ accepted`. Caveat, one line: `Measured on an RTX PRO 6000
+Blackwell. 4 concurrent requests: 571 tok/s vs 514 (SGLang) and 437 (vLLM).`
 
 ### Scene 4: memory, 17.6-20.6 s
 
@@ -122,9 +124,9 @@ graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into 
 ### Scene 5: end card, 20.2-23.7 s
 
 - Kicker: `INKLING-2-MINI · ONE 32 GB GPU`
-- Headline: `Faster single-request decode than SGLang and vLLM.` (no ratio: re-runs of the 6-prompt benchmark measured 315-349 tok/s for `--dense-fp8`, below the published 363)
-- Three zero-based bars growing in: this engine 363, SGLang 241, vLLM 242 tok/s (beside the text in 16:9)
-- Context: `Published 6-prompt greedy averages with --dense-fp8, same GPU, same 32 GB budget. 280 tok/s in default bf16. Python and Triton.`
+- Headline: `Faster decode than SGLang and vLLM.`
+- Three zero-based bars growing in: this engine 344, SGLang 232, vLLM 235 tok/s (beside the text in 16:9)
+- Context: `One request, greedy: medians over containers, same GPU, same 32 GB budget, server default. 4 requests: 571 vs 514 (SGLang) and 437 (vLLM) tok/s. Python and Triton.`
 - URL: `github.com/amw720386/inkling-2-mini-inference`
 - Bottom: `MADE AT MAGNI`
 
@@ -136,7 +138,6 @@ graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into 
 | `docs/media/loop.gif` | one token through prelude → loop × 3 → coda, experts lighting up |
 | `docs/media/memory.gif` | 32 GiB packing: 4 × 32k slots, then the 256k FP8 single-slot layout |
 | `docs/media/dspark.gif` | 7 drafts proposed, verified at width 8, prefix accepted (green), rest rejected (red), next round |
-| `docs/media/scheduler.gif` | one 4-request step: GPU busy vs Python bookkeeping gap. Only "about a third of each 4-request step" is measured (README); label the timeline schematic |
 
 ## Architecture diagrams (SVG, `-dark.svg` and `-light.svg`)
 
