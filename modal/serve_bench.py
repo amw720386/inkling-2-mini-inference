@@ -3,6 +3,7 @@
     modal run modal/serve_bench.py --engine ours          # FP8 dense + FP4 prefill, DSpark (the server default)
     modal run modal/serve_bench.py --engine ours-bf16     # --no-dense-fp8 --no-fp4-prefill
     modal run modal/serve_bench.py --engine ours --tag 2  # another container: results/serve_ours-2.json
+    modal run modal/serve_bench.py --engine ours --cap-gib 0   # this engine without the memory cap (0 = none)
     modal run modal/serve_bench.py --engine sglang        # lmsysorg/sglang:inkling-2-mini, DSpark recipe
     modal run modal/serve_bench.py --engine vllm          # vllm/vllm-openai nightly, DSpark recipe
 
@@ -48,7 +49,6 @@ vllm_image = with_files(modal.Image.from_registry("vllm/vllm-openai:nightly")
                         .entrypoint([]))
 app = modal.App("inkling2-serve-bench")
 COMMON = dict(gpu=GPU, volumes={"/weights": vol, "/cache": cache_vol}, timeout=3 * 3600, memory=65536)
-CAP = 32 * 2**30
 
 OURS_LAUNCH = """
 import sys, torch
@@ -118,9 +118,9 @@ def serve_and_bench(cmd, env, port, model_name, version_cmd=None, client_args=()
 
 
 @app.function(image=ours_image, **COMMON)
-def run_ours(extra: list[str], client: tuple = ()):
+def run_ours(extra: list[str], client: tuple = (), cap_gib: float = 32.0):
     args = ["--model", MODEL, "--port", "8000"] + extra
-    cmd = [sys.executable, "-c", OURS_LAUNCH.format(cap=CAP, args=args)]
+    cmd = [sys.executable, "-c", OURS_LAUNCH.format(cap=int(cap_gib * 2**30) if cap_gib else 2**50, args=args)]
     return serve_and_bench(cmd, {"PYTHONPATH": "/root"}, 8000, "inkling-2-mini",
                            "git -C /root describe --always 2>/dev/null; python -c 'import torch,triton;print(torch.__version__, triton.__version__)'",
                            client_args=client)
@@ -156,10 +156,10 @@ def run_vllm(extra: list[str], client: tuple = ()):
 
 
 @app.local_entrypoint()
-def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = ""):
+def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = "", cap_gib: float = 32.0):
     xs = extra.split() if extra else []
     cl = tuple(client.split()) if client else ()
-    fn = {"ours": lambda: run_ours.remote(xs, cl), "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl),
+    fn = {"ours": lambda: run_ours.remote(xs, cl, cap_gib), "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl, cap_gib),
           "sglang": lambda: run_sglang.remote(xs, cl), "vllm": lambda: run_vllm.remote(xs, cl)}[engine]
     res = fn()
     out = ROOT / "results" / f"serve_{engine}{'-' + tag if tag else ''}.json"

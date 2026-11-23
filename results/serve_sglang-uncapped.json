@@ -1,0 +1,237 @@
+{
+ "model": "/weights/Inkling-2-Mini",
+ "decode_greedy": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     159.9,
+     153.8,
+     160.0
+    ]
+   },
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     262.7,
+     265.4,
+     265.1
+    ]
+   },
+   {
+    "prompt_tokens": 28,
+    "tok_s": [
+     186.3,
+     187.9,
+     188.4
+    ]
+   },
+   {
+    "prompt_tokens": 32,
+    "tok_s": [
+     153.4,
+     164.5,
+     164.4
+    ]
+   },
+   {
+    "prompt_tokens": 5,
+    "tok_s": [
+     421.7,
+     422.6,
+     426.5
+    ]
+   },
+   {
+    "prompt_tokens": 8,
+    "tok_s": [
+     353.2,
+     354.1,
+     356.9
+    ]
+   }
+  ],
+  "runs": [
+   221.0,
+   223.3,
+   225.9
+  ],
+  "overall_tok_s": 223.3
+ },
+ "decode_t1": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     97.4,
+     256.9,
+     207.1
+    ]
+   },
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     243.5,
+     244.7,
+     296.7
+    ]
+   },
+   {
+    "prompt_tokens": 28,
+    "tok_s": [
+     148.7,
+     150.3,
+     149.5
+    ]
+   },
+   {
+    "prompt_tokens": 32,
+    "tok_s": [
+     207.8,
+     168.0,
+     195.8
+    ]
+   },
+   {
+    "prompt_tokens": 5,
+    "tok_s": [
+     109.9,
+     146.5,
+     147.0
+    ]
+   },
+   {
+    "prompt_tokens": 8,
+    "tok_s": [
+     306.5,
+     308.0,
+     231.8
+    ]
+   }
+  ],
+  "runs": [
+   156.8,
+   195.7,
+   192.8
+  ],
+  "overall_tok_s": 192.8
+ },
+ "ttft": {
+  "1024": {
+   "ttft_ms": 68.3,
+   "prefill_tok_s": 14984
+  },
+  "4096": {
+   "ttft_ms": 199.6,
+   "prefill_tok_s": 20517
+  },
+  "8192": {
+   "ttft_ms": 395.5,
+   "prefill_tok_s": 20712
+  },
+  "30000": {
+   "ttft_ms": 1588.5,
+   "prefill_tok_s": 18886
+  }
+ },
+ "concurrency": {
+  "1": {
+   "aggregate_tok_s": 228.3,
+   "runs": [
+    161.7,
+    266.9,
+    189.7,
+    165.4,
+    428.4,
+    358.8
+   ]
+  },
+  "2": {
+   "aggregate_tok_s": 301.2,
+   "runs": [
+    257.4,
+    325.6,
+    276.9,
+    341.2,
+    569.3,
+    208.6
+   ]
+  },
+  "4": {
+   "aggregate_tok_s": 505.4,
+   "runs": [
+    489.7,
+    485.7,
+    523.2,
+    360.7,
+    571.2,
+    521.1
+   ]
+  }
+ },
+ "server_accept_log": [
+  "[2026-11-23 17:09:28 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 3.70, accept rate: 0.39, cuda graph: True, gen throughput (token/s): 272.66, #queue-req: 0",
+  "[2026-11-23 17:09:28 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.50, accept rate: 0.21, cuda graph: True, gen throughput (token/s): 191.65, #queue-req: 0",
+  "[2026-11-23 17:09:36 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 4.12, accept rate: 0.45, cuda graph: True, gen throughput (token/s): 22.52, #queue-req: 0",
+  "[2026-11-23 17:09:36 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 4.90, accept rate: 0.56, cuda graph: True, gen throughput (token/s): 361.76, #queue-req: 0",
+  "[2026-11-23 17:09:37 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.52, accept rate: 0.07, cuda graph: True, gen throughput (token/s): 121.43, #queue-req: 0",
+  "[2026-11-23 17:09:37 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.00, accept rate: 0.14, cuda graph: True, gen throughput (token/s): 156.46, #queue-req: 0",
+  "[2026-11-23 17:09:38 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.35, accept rate: 0.19, cuda graph: True, gen throughput (token/s): 178.09, #queue-req: 0",
+  "[2026-11-23 17:09:38 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 4.05, accept rate: 0.44, cuda graph: True, gen throughput (token/s): 313.81, #queue-req: 0",
+  "[2026-11-23 17:09:39 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.85, accept rate: 0.26, cuda graph: True, gen throughput (token/s): 211.39, #queue-req: 0",
+  "[2026-11-23 17:09:39 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.35, accept rate: 0.19, cuda graph: True, gen throughput (token/s): 185.81, #queue-req: 0",
+  "[2026-11-23 17:09:40 PID333] Decode batch, #running-req: 1, #full token: 0, full token usage: 0.00, #window_1024 token: 0, window_1024 token usage: 0.00, mamba num: 0, mamba usage: 0.00, accept len: 2.83, accept rate: 0.26, cuda graph: True, gen throughput (token/s): 225.44, #queue-req: 0",
+  "[2026-11-23 17:09:40 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.55, accept rate: 0.22, cuda graph: True, gen throughput (token/s): 189.35, #queue-req: 0",
+  "[2026-11-23 17:09:41 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.60, accept rate: 0.23, cuda graph: True, gen throughput (token/s): 202.78, #queue-req: 0",
+  "[2026-11-23 17:09:41 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.32, accept rate: 0.05, cuda graph: True, gen throughput (token/s): 102.72, #queue-req: 0",
+  "[2026-11-23 17:09:42 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 5.80, accept rate: 0.69, cuda graph: True, gen throughput (token/s): 443.15, #queue-req: 0",
+  "[2026-11-23 17:09:43 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 4.53, accept rate: 0.50, cuda graph: True, gen throughput (token/s): 334.84, #queue-req: 0",
+  "[2026-11-23 17:09:43 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.98, accept rate: 0.43, cuda graph: True, gen throughput (token/s): 353.53, #queue-req: 0",
+  "[2026-11-23 17:09:44 PID333] Decode batch, #running-req: 2, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 3.30, accept rate: 0.33, cuda graph: True, gen throughput (token/s): 415.46, #queue-req: 0",
+  "[2026-11-23 17:09:44 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 77.29, #queue-req: 0",
+  "[2026-11-23 17:09:45 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 77.81, #queue-req: 0",
+  "[2026-11-23 17:09:45 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 1.88, accept rate: 0.13, cuda graph: True, gen throughput (token/s): 166.87, #queue-req: 0",
+  "[2026-11-23 17:09:46 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.55, accept rate: 0.36, cuda graph: True, gen throughput (token/s): 457.04, #queue-req: 0",
+  "[2026-11-23 17:09:47 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.89, accept rate: 0.13, cuda graph: True, gen throughput (token/s): 201.35, #queue-req: 0",
+  "[2026-11-23 17:09:47 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 77.25, #queue-req: 0",
+  "[2026-11-23 17:09:48 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 2.50, accept rate: 0.21, cuda graph: True, gen throughput (token/s): 285.95, #queue-req: 0",
+  "[2026-11-23 17:09:48 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 3.24, accept rate: 0.32, cuda graph: True, gen throughput (token/s): 406.99, #queue-req: 0",
+  "[2026-11-23 17:09:49 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.33, accept rate: 0.33, cuda graph: True, gen throughput (token/s): 296.42, #queue-req: 0",
+  "[2026-11-23 17:09:50 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 1.99, accept rate: 0.14, cuda graph: True, gen throughput (token/s): 254.80, #queue-req: 0",
+  "[2026-11-23 17:09:50 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 2.27, accept rate: 0.18, cuda graph: True, gen throughput (token/s): 292.41, #queue-req: 0",
+  "[2026-11-23 17:09:51 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.09, accept rate: 0.30, cuda graph: True, gen throughput (token/s): 304.14, #queue-req: 0",
+  "[2026-11-23 17:09:51 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 4.15, accept rate: 0.45, cuda graph: True, gen throughput (token/s): 502.18, #queue-req: 0",
+  "[2026-11-23 17:09:52 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.83, accept rate: 0.26, cuda graph: True, gen throughput (token/s): 221.80, #queue-req: 0",
+  "[2026-11-23 17:09:53 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.38, accept rate: 0.34, cuda graph: True, gen throughput (token/s): 343.07, #queue-req: 0",
+  "[2026-11-23 17:09:53 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 5.80, accept rate: 0.69, cuda graph: True, gen throughput (token/s): 615.98, #queue-req: 0",
+  "[2026-11-23 17:09:54 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.24, accept rate: 0.32, cuda graph: True, gen throughput (token/s): 411.90, #queue-req: 0",
+  "[2026-11-23 17:09:54 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.84, accept rate: 0.12, cuda graph: True, gen throughput (token/s): 178.66, #queue-req: 0",
+  "[2026-11-23 17:09:55 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 77.32, #queue-req: 0",
+  "[2026-11-23 17:09:55 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 78.40, #queue-req: 0",
+  "[2026-11-23 17:09:56 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 2.87, accept rate: 0.27, cuda graph: True, gen throughput (token/s): 511.30, #queue-req: 0",
+  "[2026-11-23 17:09:57 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.34, accept rate: 0.33, cuda graph: True, gen throughput (token/s): 525.37, #queue-req: 0",
+  "[2026-11-23 17:09:58 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 1.65, accept rate: 0.09, cuda graph: True, gen throughput (token/s): 208.67, #queue-req: 0",
+  "[2026-11-23 17:09:58 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.02, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 80.47, #queue-req: 0",
+  "[2026-11-23 17:09:59 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 2.50, accept rate: 0.21, cuda graph: True, gen throughput (token/s): 381.93, #queue-req: 0",
+  "[2026-11-23 17:10:00 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 3.24, accept rate: 0.32, cuda graph: True, gen throughput (token/s): 632.14, #queue-req: 0",
+  "[2026-11-23 17:10:00 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.63, accept rate: 0.23, cuda graph: True, gen throughput (token/s): 345.78, #queue-req: 0",
+  "[2026-11-23 17:10:01 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 3.36, accept rate: 0.34, cuda graph: True, gen throughput (token/s): 543.02, #queue-req: 0",
+  "[2026-11-23 17:10:02 PID333] Decode batch, #running-req: 3, #full token: 1152, full token usage: 0.00, #window_1024 token: 1152, window_1024 token usage: 0.01, mamba num: 9, mamba usage: 0.01, accept len: 3.31, accept rate: 0.33, cuda graph: True, gen throughput (token/s): 573.94, #queue-req: 0",
+  "[2026-11-23 17:10:03 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 2.53, accept rate: 0.22, cuda graph: True, gen throughput (token/s): 327.06, #queue-req: 0",
+  "[2026-11-23 17:10:03 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 3.65, accept rate: 0.38, cuda graph: True, gen throughput (token/s): 600.22, #queue-req: 0",
+  "[2026-11-23 17:10:04 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 3.54, accept rate: 0.36, cuda graph: True, gen throughput (token/s): 559.74, #queue-req: 0",
+  "[2026-11-23 17:10:05 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 2.95, accept rate: 0.28, cuda graph: True, gen throughput (token/s): 383.78, #queue-req: 0",
+  "[2026-11-23 17:10:06 PID333] Decode batch, #running-req: 3, #full token: 1152, full token usage: 0.00, #window_1024 token: 1152, window_1024 token usage: 0.01, mamba num: 9, mamba usage: 0.01, accept len: 3.79, accept rate: 0.40, cuda graph: True, gen throughput (token/s): 725.87, #queue-req: 0",
+  "[2026-11-23 17:10:06 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 2.27, accept rate: 0.18, cuda graph: True, gen throughput (token/s): 311.95, #queue-req: 0",
+  "[2026-11-23 17:10:07 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.71, accept rate: 0.10, cuda graph: True, gen throughput (token/s): 169.65, #queue-req: 0",
+  "[2026-11-23 17:10:07 PID333] Decode batch, #running-req: 1, #full token: 384, full token usage: 0.00, #window_1024 token: 384, window_1024 token usage: 0.00, mamba num: 3, mamba usage: 0.00, accept len: 1.00, accept rate: 0.00, cuda graph: True, gen throughput (token/s): 76.54, #queue-req: 0",
+  "[2026-11-23 17:10:08 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 3.74, accept rate: 0.39, cuda graph: True, gen throughput (token/s): 623.38, #queue-req: 0",
+  "[2026-11-23 17:10:09 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 4.20, accept rate: 0.46, cuda graph: True, gen throughput (token/s): 664.90, #queue-req: 0",
+  "[2026-11-23 17:10:09 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 2.79, accept rate: 0.26, cuda graph: True, gen throughput (token/s): 320.18, #queue-req: 0",
+  "[2026-11-23 17:10:10 PID333] Decode batch, #running-req: 4, #full token: 1536, full token usage: 0.00, #window_1024 token: 1536, window_1024 token usage: 0.02, mamba num: 12, mamba usage: 0.01, accept len: 3.51, accept rate: 0.36, cuda graph: True, gen throughput (token/s): 684.10, #queue-req: 0",
+  "[2026-11-23 17:10:11 PID333] Decode batch, #running-req: 2, #full token: 768, full token usage: 0.00, #window_1024 token: 768, window_1024 token usage: 0.01, mamba num: 6, mamba usage: 0.01, accept len: 2.56, accept rate: 0.22, cuda graph: True, gen throughput (token/s): 377.27, #queue-req: 0"
+ ],
+ "startup_s": 240,
+ "peak_gpu_mib": 80445,
+ "version": "0.0.0.dev1+inkling2"
+}
