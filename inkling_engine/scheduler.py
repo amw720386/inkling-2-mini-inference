@@ -58,6 +58,10 @@ def token_logprobs(logits: torch.Tensor, tok: int, k: int):
 
 
 class Scheduler:
+    # requests that arrive together start decoding together: a staggered start leaves the first request decoding
+    # alone and a longer tail of small batches at the end
+    prefill_all = True
+
     def __init__(self, engine: Engine):
         self.e = engine
         self.inbox: queue.Queue = queue.Queue()
@@ -102,11 +106,12 @@ class Scheduler:
                 except queue.Empty:
                     pass
                 self._admit()
-                if self.prefilling:  # one prompt chunk, then one decode step for the others
-                    t0 = time.time()
-                    self._prefill_step(self.prefilling[0])
-                    self.counters["prefill"][0] += 1
-                    self.counters["prefill"][1] += time.time() - t0
+                if self.prefilling:  # one prompt chunk (of each prefilling prompt), then one decode step
+                    for req in list(self.prefilling) if self.prefill_all else self.prefilling[:1]:
+                        t0 = time.time()
+                        self._prefill_step(req)
+                        self.counters["prefill"][0] += 1
+                        self.counters["prefill"][1] += time.time() - t0
                 if not self.active:
                     continue
                 try:
@@ -249,13 +254,10 @@ class Scheduler:
                 return
 
     def _spec_pays(self, reqs) -> bool:
-        """Speculate in a batched step only when its expected tokens/ms beat a batched plain step. Every so
-        often speculate anyway, so the acceptance estimates stay current."""
-        if not self.e.verify_costs:
-            return True
-        self.probe = getattr(self, "probe", 0) + 1
-        spec_rate, plain_rate = self.e.batched_spec_rate([r.accept_ema for r in reqs])
-        return spec_rate > plain_rate or self.probe % 16 == 0
+        """Batched speculation unless every request's recent acceptance is near zero. Measured at 4 requests:
+        always speculating 525-533 tok/s vs 508-519 when a measured-rate comparison switched some steps to plain
+        batched decode (bench/experiments/sched_widths.py); plain batched alone is 424-428."""
+        return any(r.accept_ema >= 0.5 for r in reqs)
 
     def _batched_spec_step(self, reqs):
         for r, (new, commit) in zip(reqs, self.e.batched_spec_round(reqs)):
@@ -271,14 +273,20 @@ class Scheduler:
         e = self.e
         reqs = [self.active[s] for s in sorted(self.active)]
         g = e.decode_graphs[len(reqs)]
+        e.harvest_costs()
+        ev = e.timer.start(("decode", len(reqs))) if e.verify_costs else None
         lg = g.step([r.slot for r in reqs], [r.P for r in reqs], [r.out[-1] for r in reqs])
+        e.timer.stop(("decode", len(reqs)), ev)
         if e.drafter is not None:  # keep every request's draft context current for when it runs alone
             for i, r in enumerate(reqs):
                 if r.spec_ok:
                     e.drafter.commit(g.ws.taps[i:i + 1], r.P, slot=r.slot)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0 and not r.sp.penalized
                   and r.constraint is None]
-        picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}  # one sync
+        if len(greedy) == len(reqs):  # no index tensor (a blocking host-to-device copy)
+            picks = dict(enumerate(lg[:len(reqs)].argmax(-1).tolist()))  # one sync
+        else:
+            picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}
         for i, r in enumerate(reqs):
             r.P += 1
             t = picks[i] if i in picks else self._pick(r, lg[i])

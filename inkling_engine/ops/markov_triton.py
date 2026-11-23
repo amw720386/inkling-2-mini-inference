@@ -36,10 +36,17 @@ def _raw_rows(Wstep, Rest, Bias, step, rows, k, st, w1, R: tl.constexpr):
 
 @triton.jit
 def _cell_kernel(step, Wstep, Rest, Bias, W1, Anchor, Tokens, State, Latent,
+                 rest_s, tok_s, state_s, lat_s,
                  R: tl.constexpr, BI: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
+    sl = tl.program_id(1)  # slot of a multi-slot draft (per-slot buffers at the given strides)
+    Rest += sl * rest_s
+    Tokens += sl * tok_s
+    State += sl * state_s
+    Latent += sl * lat_s
+    Anchor += sl
     j = pid * BI + tl.arange(0, BI)
     k = tl.arange(0, R)
     if step == 0:
@@ -62,12 +69,23 @@ def _cell_kernel(step, Wstep, Rest, Bias, W1, Anchor, Tokens, State, Latent,
 
 @triton.jit
 def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, Counter, Tokens, Conf, Temp, Seed,
+                   cb_s, ci_s, lat_s, lg_s, part_s, tok_s, conf_s,
                    K: tl.constexpr, R: tl.constexpr, BC: tl.constexpr, NPROG: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Pick = argmax(logit) when Temp <= 0, else argmax(logit / T + Gumbel noise) (a sample from
     softmax(logit / T) over the candidates). Conf is the max softmax probability of the plain logits."""
     if PDL:
         tl.extra.cuda.gdc_wait()
     pid = tl.program_id(0)
+    sl = tl.program_id(1)
+    CandBase += sl * cb_s
+    CandIdx += sl * ci_s
+    Latent += sl * lat_s
+    Logits += sl * lg_s
+    Part += sl * part_s
+    Tokens += sl * tok_s
+    Conf += sl * conf_s
+    Temp += sl
+    Counter += sl
     c = pid * BC + tl.arange(0, BC)
     k = tl.arange(0, R)
     idx = tl.load(CandIdx + step * K + c).to(tl.int64)
@@ -106,29 +124,37 @@ def _logits_kernel(step, CandBase, CandIdx, FoldW, FoldB, Latent, Logits, Part, 
 
 
 class MarkovHead:
-    """Device buffers for one drafter; run() executes the GAMMA steps (14 launches)."""
+    """Device buffers for up to `slots` drafters; run() executes the GAMMA steps of n of them at once (14 launches,
+    slots on the second grid axis)."""
 
-    def __init__(self, gamma: int, rank: int, k: int, device="cuda"):
+    def __init__(self, gamma: int, rank: int, k: int, device="cuda", slots: int = 1):
         self.gamma, self.rank, self.k = gamma, rank, k
-        self.state = torch.zeros(gamma + 1, rank, dtype=torch.bfloat16, device=device)
-        self.latent = torch.zeros(rank, dtype=torch.bfloat16, device=device)
-        self.logits = torch.zeros(gamma, k, dtype=torch.float32, device=device)
+        self.state = torch.zeros(slots, gamma + 1, rank, dtype=torch.bfloat16, device=device)
+        self.latent = torch.zeros(slots, rank, dtype=torch.bfloat16, device=device)
+        self.logits = torch.zeros(slots, gamma, k, dtype=torch.float32, device=device)
         self.bc = 64
         self.nprog = k // self.bc
-        self.part = torch.zeros(self.nprog * 4, dtype=torch.float32, device=device)
-        self.counter = torch.zeros(1, dtype=torch.int32, device=device)
+        self.part = torch.zeros(slots, self.nprog * 4, dtype=torch.float32, device=device)
+        self.counter = torch.zeros(slots, dtype=torch.int32, device=device)
+        if slots == 1:  # single-drafter views (the original shapes)
+            self.logits = self.logits[0]
 
-    def run(self, rest, cand_base, cand_idx, w_step, bias, w1, anchor, fold_w, fold_b, tokens, conf, temp, seed):
-        """rest fp32 [G, 3R]; cand_base fp32 [G, K]; cand_idx int32/int64 [G, K]; tokens int64 [G]; conf fp32 [G]."""
+    def run(self, rest, cand_base, cand_idx, w_step, bias, w1, anchor, fold_w, fold_b, tokens, conf, temp, seed,
+            n: int = 1):
+        """One slot: rest fp32 [G, 3R]; cand_base fp32 [G, K]; cand_idx int64 [G, K]; tokens int64 [G]; conf fp32
+        [G]; anchor / temp [1]. n slots: a leading [n] axis on all of them (contiguous per slot)."""
         r, kk = self.rank, self.k
-        self.state[0].zero_()
+        st = (lambda t: t.stride(0)) if n > 1 else (lambda t: 0)
+        self.state[:n, 0].zero_()
         for i in range(self.gamma):
-            _cell_kernel[(r // 32,)](i, w_step, rest, bias, w1, anchor, tokens, self.state, self.latent,
-                                     R=r, BI=32, num_warps=4)
-            _logits_kernel[(self.nprog,)](i, cand_base, cand_idx, fold_w, fold_b, self.latent, self.logits, self.part,
-                                          self.counter, tokens, conf, temp, seed, K=kk, R=r, BC=self.bc,
-                                          NPROG=self.nprog,
-                                          num_warps=4)
+            _cell_kernel[(r // 32, n)](i, w_step, rest, bias, w1, anchor, tokens, self.state, self.latent,
+                                       st(rest), st(tokens), self.state.stride(0), self.latent.stride(0),
+                                       R=r, BI=32, num_warps=4)
+            _logits_kernel[(self.nprog, n)](i, cand_base, cand_idx, fold_w, fold_b, self.latent, self.logits,
+                                            self.part, self.counter, tokens, conf, temp, seed,
+                                            st(cand_base), st(cand_idx), self.latent.stride(0),
+                                            st(self.logits) if n > 1 else 0, self.part.stride(0), st(tokens),
+                                            st(conf), K=kk, R=r, BC=self.bc, NPROG=self.nprog, num_warps=4)
 
 
 _pdl_enable(_cell_kernel, _logits_kernel)

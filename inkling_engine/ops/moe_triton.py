@@ -230,15 +230,28 @@ def moe_decode(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w13: Exper
     rows = rows_buf if rows_buf is not None else torch.empty(pairs, hdim, dtype=torch.float32, device=x.device)
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else wts_f
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else wts_f
-    _moe_gemv_kernel[lambda m: (pairs, triton.cdiv(n13, m["BN"]))](
-        x, k, x.stride(0), w13.weight, _scale_view(w13), f13, ids_f, act, act.stride(0), wts_f,
-        n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, HW_FP4=hw_fp4,
-    )
-    _moe_gemv_kernel[lambda m: (pairs, triton.cdiv(hdim, m["BN"]))](
-        act, 1, act.stride(0), w2.weight, _scale_view(w2), f2, ids_f, rows, rows.stride(0), wts_f,
-        hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap, HW_FP4=hw_fp4,
-    )
+    pin13 = _NVFP4_PIN13 if w13.fmt == "nvfp4" and hw_fp4 else None
+    pin2 = (_NVFP4_PIN2[min(t, 2)] if w2.fmt == "nvfp4" and hw_fp4 else None)
+    _gemv_launch(pin13, pairs, n13, x, k, x.stride(0), w13.weight, _scale_view(w13), f13, ids_f, act, act.stride(0),
+                 wts_f, n13, hdim, _fmt_id(w13), 1, gate_cap, up_cap, HW_FP4=hw_fp4)
+    _gemv_launch(pin2, pairs, hdim, act, 1, act.stride(0), w2.weight, _scale_view(w2), f2, ids_f, rows,
+                 rows.stride(0), wts_f, hdim, inter, _fmt_id(w2), 0, gate_cap, up_cap, HW_FP4=hw_fp4)
     return rows
+
+
+# NVFP4 decode GEMV configs (BN, BK, warps, stages) from DRAM-cold timings (tests/gpu/bench_moe_cold.py); the
+# autotuner times L2-hot repeats and picked 8 warps for w13 (T=1: 27.8 -> 14.8 us cold). Same BK as its picks,
+# so the same bits. w2 by token count: T=1 keeps (32, 128, 4, 3); T=2-3 (64, 128, 2, 3) (21.1 -> 15.7 us at T=2).
+_NVFP4_PIN13 = (32, 256, 2, 3)
+_NVFP4_PIN2 = {1: (32, 128, 4, 3), 2: (64, 128, 2, 3)}
+
+
+def _gemv_launch(pin, pairs, n, *args, **kw):
+    if pin is None:
+        _moe_gemv_kernel[lambda m: (pairs, triton.cdiv(n, m["BN"]))](*args, **kw)
+    else:
+        bn, bk, nw, ns = pin
+        _moe_gemv_kernel.fn[(pairs, triton.cdiv(n, bn))](*args, **kw, BN=bn, BK=bk, num_warps=nw, num_stages=ns)
 
 
 # -------------------------------------------------------------------------- prefill
@@ -437,11 +450,9 @@ def _route_sort_kernel(Ids, Starts, Ends, RowSrc, P, E: tl.constexpr, BP: tl.con
     starts = ends - counts
     tl.store(Starts + ea, starts)
     tl.store(Ends + ea, ends)
-    # rank of pair i among earlier pairs of its expert (stable)
-    same_before = (e[:, None] == e[None, :]) & (i[None, :] < i[:, None])
-    rank = tl.sum(same_before.to(tl.int32), 1)
-    start_e = tl.sum(tl.where(ea[None, :] == e[:, None], starts[None, :], 0), 1)
-    tl.store(RowSrc + start_e + rank, i, mask=ok)
+    # stable order by expert: sort keys expert * BP + pair (padding sorts last, so the first P are the pairs)
+    sk = tl.sort(e * BP + i)
+    tl.store(RowSrc + i, sk % BP, mask=ok)
 
 
 class GroupedScratch:
@@ -466,8 +477,9 @@ def moe_grouped_small(x, ids, wts, w13: ExpertWeight, w2: ExpertWeight, gate_cap
     k = ids.shape[1]
     p = t * k
     e, n13, _ = w13.shape
-    _route_sort_kernel[(1,)](ids.reshape(-1), sc.starts, sc.ends, sc.row_src, p, E=e,
-                             BP=triton.next_power_of_2(p), num_warps=8)
+    bp = triton.next_power_of_2(p)
+    nw = 8 if bp == 64 else (1 if bp == 128 else 4)  # bench_route_sort.py
+    _route_sort_kernel[(1,)](ids.reshape(-1), sc.starts, sc.ends, sc.row_src, p, E=e, BP=bp, num_warps=nw)
     starts, ends, row_src = sc.starts, sc.ends, sc.row_src[:p]
     f13 = w13.expert_factor if w13.fmt == "nvfp4" else sc.counts
     f2 = w2.expert_factor if w2.fmt == "nvfp4" else sc.counts

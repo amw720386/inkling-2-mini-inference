@@ -1,6 +1,6 @@
 """OpenAI-compatible HTTP server for the engine (continuous batching over --slots concurrent requests).
 
-  python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000 [--no-spec] [--dense-fp8]
+  python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000 [--no-spec] [--no-dense-fp8] [--no-fp4-prefill]
 
 Endpoints: GET /v1/models, POST /v1/chat/completions, POST /v1/completions (both with "stream": true).
 Chat output is split into `reasoning_content` (the model's thinking section) and `content`.
@@ -100,6 +100,8 @@ class Splitter:
         self.tool = ""
         return name, args
 
+
+COALESCE = True  # stream tokens to the event loop per scheduler step, not per token
 
 def normalize_messages(messages: list[dict]) -> list[dict]:
     """OpenAI clients send tool-call arguments as JSON strings; the template wants parsed objects."""
@@ -338,12 +340,28 @@ def build_app(server: Server):
 
         out_tokens: list[int] = []
 
-        def on_token(t):  # scheduler thread -> event loop
-            if t is None:
-                loop.call_soon_threadsafe(q.put_nowait, (done, None))
-            else:
+        pending: list = []  # tokens from the scheduler thread not yet handed to the event loop
+        plock = threading.Lock()
+
+        def flush():  # event loop: one wake-up delivers every token of a speculative round
+            with plock:
+                items = pending[:]
+                pending.clear()
+            for it in items:
+                q.put_nowait(it)
+
+        def on_token(t):  # scheduler thread -> event loop (coalesced: the scheduler thread holds the GIL here)
+            item = (done, None) if t is None else t
+            if t is not None:
                 out_tokens.append(t)
-                loop.call_soon_threadsafe(q.put_nowait, t)
+            if not COALESCE:
+                loop.call_soon_threadsafe(q.put_nowait, item)
+                return
+            with plock:
+                pending.append(item)
+                first = len(pending) == 1
+            if first:
+                loop.call_soon_threadsafe(flush)
 
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
         n_lp = requested_logprobs(body, chat)
@@ -373,8 +391,28 @@ def build_app(server: Server):
 
         try:
             while True:
-                item = await q.get()
-                if isinstance(item, tuple) and item and item[0] is done:
+                batch = [await q.get()]
+                while COALESCE and not q.empty():  # everything already delivered: decode once for all of it
+                    batch.append(q.get_nowait())
+                finished = any(isinstance(it, tuple) and it and it[0] is done for it in batch)
+                new = [it for it in batch if not (isinstance(it, tuple) and it and it[0] is done)]
+                if new and not stopped:
+                    toks.extend(new)
+                    text = tok.decode(toks, skip_special_tokens=not chat)  # chat: the splitter reads the markers
+                    end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
+                    if stops:
+                        lo = max(0, emitted - hold)
+                        hits = [i for i in (text.find(x, lo) for x in stops) if i >= 0]
+                        if hits:
+                            end, stopped = min(hits), True
+                            req.cancel.set()
+                        else:
+                            end = max(emitted, end - hold)
+                    delta, emitted = text[emitted:end], max(emitted, end)
+                    r, c, calls = feed(delta)
+                    if r or c or calls:
+                        yield ("delta", r, c, calls, new_lps())
+                if finished:
                     if req.error is not None:
                         raise req.error
                     tail = "" if stopped else text[emitted:]
@@ -382,23 +420,6 @@ def build_app(server: Server):
                     yield ("delta", r, c, calls, new_lps())
                     yield ("end", list(out_tokens), req.stats, rid, created, stopped)
                     return
-                if stopped:
-                    continue  # tokens generated before the cancel reached the scheduler
-                toks.append(item)
-                text = tok.decode(toks, skip_special_tokens=not chat)  # chat: the splitter reads the markers
-                end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
-                if stops:
-                    lo = max(0, emitted - hold)
-                    hits = [i for i in (text.find(x, lo) for x in stops) if i >= 0]
-                    if hits:
-                        end, stopped = min(hits), True
-                        req.cancel.set()
-                    else:
-                        end = max(emitted, end - hold)
-                delta, emitted = text[emitted:end], max(emitted, end)
-                r, c, calls = feed(delta)
-                if r or c or calls:
-                    yield ("delta", r, c, calls, new_lps())
         finally:
             if not req.done.is_set():  # the client went away (generator closed): stop generating
                 req.cancel.set()
@@ -507,12 +528,14 @@ def main():
     ap.add_argument("--max-ctx", type=int, default=32768)
     ap.add_argument("--slots", type=int, default=4, help="concurrent requests (batched decode)")
     ap.add_argument("--no-spec", action="store_true")
-    ap.add_argument("--dense-fp8", action="store_true")
+    ap.add_argument("--dense-fp8", action=argparse.BooleanOptionalAction, default=True,
+                    help="FP8 attention projections + LM head (default on; --no-dense-fp8 for the bf16 checkpoint math)")
     ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
     ap.add_argument("--prefill-chunk", type=int, default=2048,
                     help="prompt tokens per prefill step (4096: ~5%% faster prefill, longer pauses for other requests)")
-    ap.add_argument("--fp4-prefill", action="store_true",
-                    help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6)")
+    ap.add_argument("--fp4-prefill", action=argparse.BooleanOptionalAction, default=None,
+                    help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6; "
+                         "default on when supported, --no-fp4-prefill for bf16 prefill experts)")
     ap.add_argument("--no-vision", action="store_true", help="text only (skips loading the 0.6 GB vision tower)")
     ap.add_argument("--model-id", default="inkling-2-mini")
     ap.add_argument("--default-temperature", type=float, default=None,
@@ -524,10 +547,18 @@ def main():
 
     from .engine import Engine
 
+    if a.fp4_prefill is None:  # default: on where the Triton build supports it
+        from .ops.moe_fp4 import check_support
+        try:
+            check_support()
+            a.fp4_prefill = True
+        except RuntimeError as e:
+            print(f"fp4_prefill off: {e}")
+            a.fp4_prefill = False
     tok = AutoTokenizer.from_pretrained(a.model)
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
                  kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision,
-                 fp4_prefill=a.fp4_prefill or None, prefill_chunk=a.prefill_chunk)
+                 fp4_prefill=a.fp4_prefill, prefill_chunk=a.prefill_chunk)
     defaults = generation_defaults(a.model)
     if a.default_temperature is not None:
         defaults["temperature"] = a.default_temperature

@@ -29,6 +29,37 @@ SEEDED_GAMMA = 2.0  # fixed confidence calibration for seeded requests (reproduc
 IMAGE_TOKEN_ID = 200054
 
 
+class GpuTimer:
+    """Measured GPU time of graph replays without extra syncs: events around a replay are read once they have
+    completed (after the round's own host sync), and `harvest` hands each (key, ms) to a callback."""
+
+    def __init__(self):
+        self.events, self.pending = {}, []
+
+    def start(self, key):
+        ev = self.events.get(key)
+        if ev is None:
+            ev = self.events[key] = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        if any(k == key for k, _ in self.pending):  # still unread: skip this sample
+            return None
+        ev[0].record()
+        return ev
+
+    def stop(self, key, ev):
+        if ev is not None:
+            ev[1].record()
+            self.pending.append((key, ev))
+
+    def harvest(self, fn):
+        keep = []
+        for key, (e0, e1) in self.pending:
+            if e1.query():
+                fn(key, e0.elapsed_time(e1))
+            else:
+                keep.append((key, (e0, e1)))
+        self.pending = keep
+
+
 def _drain(gen):
     """Run a generator to completion and return its return value."""
     while True:
@@ -183,8 +214,11 @@ class Engine:
         if spec and graphs:
             self.drafter.capture(self.pool)
         self.gamma = 2.0
-        self.draft_cost, self.verify_costs, self.decode_costs = 1.0, {}, {}
+        self.draft_cost, self.verify_costs, self.decode_costs, self.draft_multi_costs = 1.0, {}, {}, {}
+        self.timer = GpuTimer()
+        self.batch_rounds: dict = {}  # k -> batched rounds so far
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
+        self.seeded_costs = dict(self.costs)  # fixed at calibration: a seeded request's widths never depend on traffic
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
         self.slot_ids: list[list[int]] = [[] for _ in range(slots)]  # tokens whose positions each slot holds
         self.snaps: list = [None] * slots  # per slot: state at the end of its last prompt (see _snapshot)
@@ -220,25 +254,42 @@ class Engine:
         draft = t(lambda: self.drafter.graphs[(self.drafter.buckets[0], 0)].replay())
         convs = (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)
         snap = [x.clone() for x in convs]
+        # distinct tokens per row: identical rows route to the same experts and hide the cost of width and
+        # batch size (the MoE reads every hit expert); `_observe_cost` then tracks the measured replays
+        gen = torch.Generator(device="cuda").manual_seed(0)
+        for g in list(self.verify.values()) + list(self.decode_graphs.values()):
+            ids = g.batch.input_ids
+            ids.copy_(torch.randint(1000, 150000, ids.shape, generator=gen, device="cuda"))
         costs = {m: draft + t(lambda g=self.verify[(1, m)]: g.graph.replay()) for m in VERIFY_WIDTHS}
         # for the scheduler's choice between batched speculation and batched plain decode
         self.draft_cost = draft
         self.verify_costs = {km: t(lambda g=g: g.graph.replay(), 10) for km, g in self.verify.items()}
         self.decode_costs = {k: t(lambda g=g: g.graph.replay(), 10) for k, g in self.decode_graphs.items()}
+        self.draft_multi_costs = {k: draft * (1 + 0.5 * (k - 1)) for k in self.decode_graphs}  # then measured
         for x, v in zip(convs, snap):
             x.copy_(v)
         self.drafter.reset()
         return costs
 
-    def batched_spec_rate(self, accept_estimates: list[float]) -> tuple[float, float]:
-        """(expected tokens/ms of a batched DSpark round, tokens/ms of a batched plain step) for requests
-        with these expected accepted drafts per round."""
-        k = len(accept_estimates)
-        best = 0.0
-        for m in VERIFY_WIDTHS:
-            tokens = sum(1.0 + min(a, m - 1) for a in accept_estimates)
-            best = max(best, tokens / (k * self.draft_cost + self.verify_costs[(k, m)]))
-        return best, k / self.decode_costs[k]
+    COST_EMA = 0.2  # weight of a new measurement
+
+    def _observe_cost(self, key, ms: float):
+        """Online cost tracking from measured replays (GpuTimer): ("verify", k, m), ("decode", k), ("draft", k)."""
+        a = self.COST_EMA
+        if key[0] == "verify":
+            km = key[1:]
+            if km in self.verify_costs:
+                self.verify_costs[km] = (1 - a) * self.verify_costs[km] + a * ms
+                if km[0] == 1:
+                    self.costs[km[1]] = self.draft_cost + self.verify_costs[km]
+        elif key[0] == "decode" and key[1] in self.decode_costs:
+            self.decode_costs[key[1]] = (1 - a) * self.decode_costs[key[1]] + a * ms
+        elif key[0] == "draft" and key[1] in self.draft_multi_costs:
+            self.draft_multi_costs[key[1]] = (1 - a) * self.draft_multi_costs[key[1]] + a * ms
+
+    def harvest_costs(self):
+        if self.verify_costs:
+            self.timer.harvest(self._observe_cost)
 
     def _expected(self, conf: list[float], m: int, gamma: float | None = None) -> float:
         """Expected accepted drafts of a width-m verify: leading products of conf ** gamma."""
@@ -249,15 +300,33 @@ class Engine:
             exp += run
         return exp
 
-    def _pick_width(self, conf: list[float], gamma: float | None = None) -> int:
+    def _pick_width(self, conf: list[float], gamma: float | None = None, seeded: bool = False) -> int:
         """Width maximizing expected committed tokens per ms. The drafter's confidences overstate
-        acceptance; gamma (confidence ** gamma) is tuned online by `_observe`."""
+        acceptance; gamma (confidence ** gamma) is tuned online by `_observe`. Seeded requests use the fixed
+        calibration costs (reproducible); the others the online measured ones."""
+        costs = self.seeded_costs if seeded else self.costs
         best, best_rate = VERIFY_WIDTHS[0], -1.0
         for m in VERIFY_WIDTHS:
-            rate = (1.0 + self._expected(conf, m, gamma)) / self.costs[m]
+            rate = (1.0 + self._expected(conf, m, gamma)) / costs[m]
             if rate > best_rate:
                 best, best_rate = m, rate
         return best
+
+    # common verify width of a batched round (bench/experiments/sched_widths.py, greedy, 4 requests): width 4
+    # 532-535 tok/s vs 449 (2), 447-461 (8), 472 (3), 474 (6), 511-519 for the per-round confidence pick, 451-528
+    # for a measured-rate bandit, 477-514 for ragged per-request widths. Width 8 pays only for a pair of requests
+    # that both accept well (2 requests, rep 0: 472 vs 447 for 4); in a 4-request run's tail it lost (517-526).
+    BATCH_WIDTH = 4
+    WIDE_PAIR_ACCEPT = 1.0  # mean recent accepted drafts per round of a 2-request batch for width 8 (1.0: 482 vs
+    # 472 tok/s for 1.5 on prompts 0-1, level on the others)
+
+    predraft = True  # batched rounds launch the next round's multi-slot draft before returning
+    predraft_key = None
+
+    def _pick_width_batched(self, reqs) -> int:
+        if len(reqs) == 2 and sum(getattr(r, "accept_ema", 0.0) for r in reqs) / 2 >= self.WIDE_PAIR_ACCEPT:
+            return 8
+        return self.BATCH_WIDTH
 
     def _observe(self, conf: list[float], m: int, accepted: int):
         err = accepted - self._expected(conf, m)
@@ -323,6 +392,7 @@ class Engine:
         interleave decode steps); returns (last logits, reused tokens). The slot reuses (a) everything it processed
         so far when `ids` extends it, or (b) its previous prompt's snapshot when `ids` extends that prompt (a chat
         turn whose template re-renders the earlier answer); see `reusable`."""
+        self.predraft_key = None  # a queued draft never carries over to another request (seed, context)
         start = 0
         img_pos = [i for i, t in enumerate(ids) if t == IMAGE_TOKEN_ID]
         if img_pos and (image_feats is None or image_feats.shape[0] != len(img_pos)):
@@ -429,15 +499,23 @@ class Engine:
                    slot: int = 0) -> tuple[list[int], int]:
         """One DSpark round for the sequence in `slot` whose anchor (sampled, not yet processed) is at P.
         Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
-        drafts, conf = self.drafter.draft(anchor, P, self._draft_temp(sp), slot=slot)
+        self.harvest_costs()
+        temp = self._draft_temp(sp)
+        if self.predraft_key == ("one", slot, P, anchor, temp):  # queued at the end of the previous round
+            drafts, conf = self.drafter.draft_tokens, self.drafter.conf
+        else:
+            drafts, conf = self.drafter.draft(anchor, P, temp, slot=slot)
+        self.predraft_key = None
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
         seeded = sp.seed is not None
-        m = self._pick_width(confs, SEEDED_GAMMA if seeded else None)
+        m = self._pick_width(confs, SEEDED_GAMMA if seeded else None, seeded)
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
+        ev = self.timer.start(("verify", 1, m)) if self.verify_costs else None
         logits, taps = self.verify[(1, m)].run(vt, [slot], [P])
+        self.timer.stop(("verify", 1, m), ev)
         if sp.temperature <= 0:
             target = logits.argmax(-1)
             acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
@@ -450,6 +528,9 @@ class Engine:
             self._observe(confs, m, acc)
         self.cache.commit_spec(slot, commit, 0)
         self.drafter.commit(taps[:commit], P, slot=slot)
+        if self.predraft:  # next round's draft goes to the GPU while the host hands out these tokens
+            self.drafter.draft(nxt, P + commit, temp, slot=slot)
+            self.predraft_key = ("one", slot, P + commit, nxt, temp)
         if st is not None:
             st.rounds += 1
             st.accepted += acc
@@ -462,49 +543,73 @@ class Engine:
         anchor), .sp, .gen, .stats. Returns per request (new tokens, rows committed)."""
         d = self.drafter
         drafts = []
-        multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs],
-                              [self._draft_temp(r.sp) for r in reqs], [r.slot for r in reqs])
+        self.harvest_costs()
+        k = len(reqs)
+        temps = [self._draft_temp(r.sp) for r in reqs]
+        key = (tuple(r.slot for r in reqs), tuple(r.P for r in reqs), tuple(r.out[-1] for r in reqs), tuple(temps))
+        if self.predraft_key == key:  # launched at the end of the previous round, already running or done
+            multi = [(d.m_tok[i], d.m_conf[i], d.m_cand[i], d.m_heads.logits[i]) for i in range(k)]
+        else:
+            ev = self.timer.start(("draft", k)) if self.verify_costs else None
+            multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs], temps, [r.slot for r in reqs])
+            self.timer.stop(("draft", k), ev)
+        self.predraft_key = None
         for r, (tok, conf, cand, lg_c) in zip(reqs, multi):
             q = torch.softmax(lg_c / self._draft_temp(r.sp), -1) if r.sp.temperature > 0 else None
             drafts.append((tok, conf, cand if q is not None else None, q))
-        info = torch.cat([torch.cat([c, t.float()]) for t, c, _, _ in drafts]).tolist()  # one sync
-        k = len(reqs)
-        confs = [info[i * 14:i * 14 + 7] for i in range(k)]
-        drafted = [[int(x) for x in info[i * 14 + 7:i * 14 + 14]] for i in range(k)]
-        m = max(self._pick_width(c, SEEDED_GAMMA if r.sp.seed is not None else None) for c, r in zip(confs, reqs))
-        vt = torch.empty(k * m, dtype=torch.int64, device="cuda")
-        for i, r in enumerate(reqs):
-            vt[i * m] = r.out[-1]
-            vt[i * m + 1:(i + 1) * m].copy_(drafts[i][0][:m - 1])
+        m_tok = d.m_tok[:k]  # [k, 7] drafts of batch positions 0..k-1 (the views returned above)
+        # the width depends only on k, so the verify is queued right behind the draft: no host round trip between
+        # them; drafts, confidences and the greedy acceptance come back in one sync after the verify
+        m = self._pick_width_batched(reqs)
+        anchors = torch.tensor([r.out[-1] for r in reqs], dtype=torch.int64).to("cuda", non_blocking=True)
+        vt = torch.cat([anchors[:, None], m_tok[:, :m - 1]], 1).reshape(-1)
+        ev = self.timer.start(("verify", k, m))
         logits, taps = self.verify[(k, m)].run(vt, [r.slot for r in reqs], [r.P for r in reqs])
+        self.timer.stop(("verify", k, m), ev)
         lg = logits.view(k, m, -1)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
-        res = {}
+        parts = [torch.cat([d.m_conf[:k], m_tok.float()], 1).reshape(-1)]  # ids < 2^24: exact in fp32
         if greedy:
-            gi = torch.tensor(greedy, device=lg.device)
-            target = lg[gi].argmax(-1)  # [g, m]
-            dr = torch.stack([drafts[i][0][:m - 1] for i in greedy])
+            if len(greedy) == k:  # no index tensor (a blocking host-to-device copy)
+                target, dr = lg.argmax(-1), m_tok[:, :m - 1]
+            else:
+                gi = torch.tensor(greedy, dtype=torch.int64).to("cuda", non_blocking=True)
+                target = lg[gi].argmax(-1)  # [g, m]
+                dr = m_tok[gi, :m - 1]
             acc = (dr == target[:, :m - 1]).int().cumprod(1).sum(1)
-            flat = torch.cat([acc[:, None], target.int()], 1).tolist()  # one sync
-            for j, i in enumerate(greedy):
-                a = flat[j][0]
-                res[i] = (a, flat[j][1 + a])
+            parts.append(torch.cat([acc[:, None], target], 1).float().reshape(-1))
+        vals = torch.cat(parts).tolist()  # the round's one sync
+        confs = [vals[i * 14:i * 14 + 7] for i in range(k)]
+        drafted = [[int(x) for x in vals[i * 14 + 7:i * 14 + 14]] for i in range(k)]
+        res = {}
+        base = 14 * k
+        for j, i in enumerate(greedy):
+            row = vals[base + j * (m + 1):base + (j + 1) * (m + 1)]
+            a = int(row[0])
+            res[i] = (a, int(row[1 + a]))
         for i, r in enumerate(reqs):
             if i not in res:
                 _, _, cand, q = drafts[i]
                 res[i] = accept_sampled(drafts[i][0][:m - 1], lg[i], cand[:m - 1], q[:m - 1], r.sp, r.gen)
         out = []
+        self.cache.commit_spec_multi([r.slot for r in reqs], [res[i][0] + 1 for i in range(k)])
         for i, r in enumerate(reqs):
             a, nxt = res[i]
             commit = a + 1
             if r.sp.seed is None:
                 self._observe(confs[i], m, a)
-            self.cache.commit_spec(r.slot, commit, i)
             d.commit(taps[i * m:i * m + commit], r.P, slot=r.slot)
             r.stats.rounds += 1
             r.stats.accepted += a
             r.stats.widths[m] = r.stats.widths.get(m, 0) + 1
             out.append((drafted[i][:a] + [nxt], commit))
+        if self.predraft:
+            # the next round's drafts (same requests, their new anchors / positions) go to the GPU now, so it drafts
+            # while the host hands out this round's tokens; the next round uses them if nothing changed
+            nP = [r.P + c for r, (_, c) in zip(reqs, out)]
+            nA = [toks[-1] for toks, _ in out]
+            d.draft_multi(nA, nP, temps, [r.slot for r in reqs])
+            self.predraft_key = (tuple(r.slot for r in reqs), tuple(nP), tuple(nA), tuple(temps))
         return out
 
     # sampled requests draft at temperature * scale; acceptance stays exact for any scale > 0. 0.8 measured best
