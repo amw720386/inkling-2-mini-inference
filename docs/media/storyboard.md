@@ -58,7 +58,7 @@ Segment sizes inside those totals (weights, KV, rings, graphs) are computed from
 
 Where we lose (must appear somewhere in the video): SGLang serves 4 concurrent requests faster (545 vs 474 tok/s).
 
-## Hero video (1080 × 1080, ~26 s; 16:9 cut 1920 × 1080 with the same timing)
+## Hero video (1080 × 1080, ~23.7 s; 16:9 cut 1920 × 1080 with the same timing)
 
 Each scene is rendered at both sizes, 30 fps, exact duration, as `scene-<n>-<1x1|16x9>.mp4`
 (H.264, CRF 12, yuv420p), with its sources under `docs/media/src/`. `src/render.sh` joins them with 0.4 s cross-fades.
@@ -75,7 +75,7 @@ times (orange arc on each return), exits the coda. On every visit, 8 of the 128 
 | 2.2-4.1 s | `PRELUDE 6 · LOOP 12 × 3 · CODA 6` | Every token makes 48 layer visits. |
 | 4.1-6.0 s | `128 EXPERTS · TOP-8 · ONE 32 GB GPU` | 8 of 128 experts light up each visit. |
 
-### Scene 2: real-run race, 6.0-14.0 s
+### Scene 2: real-run race, 5.6-12.4 s (6.8 s clip)
 
 Caps label `DEMO · REAL RUN · ONE RTX PRO 6000 · PLAYED AT 1×`, the prompt as a one-line headline, the prompt
 text small below it. Three cards stacked (1:1) or side by side (16:9):
@@ -96,7 +96,7 @@ GB202 chip), 32 GB budget per engine, greedy, DSpark on all three.`
 
 The race question and its selection rule are documented in the race scene's source.
 
-### Scene 3: how it works, 14.0-20.0 s
+### Scene 3: how it works, 12.0-18.0 s
 
 Caps label `HOW`, headline: `One CUDA graph per step. DSpark drafts 7 tokens ahead.`
 
@@ -109,13 +109,13 @@ Three boxes joined by arrows, each with a caps label, a two-line body and a smal
 Legend line: `■ active expert  ■ draft token  ■ accepted`. Caveat, one line: `Measured on an RTX PRO 6000 (the RTX
 5090's chip). SGLang still leads at 4 concurrent requests: 545 vs 474 tok/s.`
 
-### Scene 4: memory, 20.0-23.0 s
+### Scene 4: memory, 17.6-20.6 s
 
 Caps label `32 GB · ONE CARD`. A 32 GiB bar (or 3D slab) filling: weights, then four 32k KV slots (blue), CUDA
 graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into one long FP8 slot. Headline:
 `Or 256k on one card.` Small numbers: `26.4 GiB after start · 28.8 GiB peak` → `25.3 / 28.6 GiB with --kv-fp8`.
 
-### Scene 5: end card, 23.0-26.5 s
+### Scene 5: end card, 20.2-23.7 s
 
 - Kicker: `INKLING-2-MINI · ONE 32 GB GPU`
 - Headline: `Faster single-request decode than SGLang and vLLM.` (no ratio: re-runs of the 6-prompt benchmark measured 315-349 tok/s for `--dense-fp8`, below the published 363)
