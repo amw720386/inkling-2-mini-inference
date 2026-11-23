@@ -530,7 +530,7 @@ def _moe_sum_kernel(Rows, M, H: tl.constexpr, TOPK: tl.constexpr, BH: tl.constex
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
-    h = tl.arange(0, BH)
+    h = tl.program_id(1) * BH + tl.arange(0, BH)  # channels are independent: any split is bit-identical
     hm = h < H
     acc = tl.zeros((BH,), tl.float32)
     for j in tl.static_range(TOPK):
@@ -582,7 +582,10 @@ def post_mlp(rows, m_buf, conv_w, state, resid, dst, meta, tok_seq, cfg, *, deco
     t, h = resid.shape
     bh = triton.next_power_of_2(h)
     if not decode_state and rows is not None:
-        _moe_sum_kernel[(t,)](rows, m_buf, H=h, TOPK=cfg.top_k, BH=bh, num_warps=8)
+        if t <= 64:  # verify-sized: split channels so more than t SMs read the rows
+            _moe_sum_kernel[(t, triton.cdiv(h, 256))](rows, m_buf, H=h, TOPK=cfg.top_k, BH=256, num_warps=2)
+        else:
+            _moe_sum_kernel[(t, 1)](rows, m_buf, H=h, TOPK=cfg.top_k, BH=bh, num_warps=8)
     bc = 256
     _post_mlp_kernel[(t, triton.cdiv(h, bc))](
         m_buf, m_buf.stride(0), rows if rows is not None else m_buf, conv_w, state, state.stride(0), state.stride(1), resid, dst, dst.stride(0),
