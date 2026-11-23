@@ -2,7 +2,7 @@
 
 From the repo root (weights in the volume of modal/download_weights.py):
     python docs/media/src/race/make_prompts.py --tokenizer /path/to/tokenizer.json
-    modal run docs/media/src/race/capture.py --engines ours-fp8,sglang,vllm --outdir /tmp
+    modal run docs/media/src/race/capture.py --engines ours,sglang,vllm --outdir /tmp
     python docs/media/src/race/pick.py /tmp/race_raw_*.json
 Reuses modal/serve_bench.py's images and server flags verbatim. Each run writes race_raw_<engine>.json: per prompt,
 the arrival time of every streamed chunk.
@@ -103,8 +103,8 @@ def run_vllm():
 
 
 @app.local_entrypoint()
-def main(engines: str = "ours-fp8,sglang,vllm", outdir: str = "/tmp"):
-    fns = {"ours": lambda: run_ours.spawn([]), "ours-fp8": lambda: run_ours.spawn(["--dense-fp8"]),
+def main(engines: str = "ours,sglang,vllm", outdir: str = "/tmp"):
+    fns = {"ours": lambda: run_ours.spawn([]),
            "sglang": lambda: run_sglang.spawn(), "vllm": lambda: run_vllm.spawn()}
     calls = {e: fns[e]() for e in engines.split(",")}
     for e, c in calls.items():

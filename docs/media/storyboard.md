@@ -1,5 +1,8 @@
 # Media storyboard
 
+> Scenes 3 and 5 of the rendered video, `scheduler.gif` and the numbers below are out of date (the README and
+> `docs/benchmarks.md` have the current ones). Re-render before posting.
+
 The plan for the launch video, the README GIFs and the architecture diagrams. Every number on screen comes from
 `results/` or `docs/`, and the file it comes from is listed next to it. Change a number here first, then in the
 scenes.

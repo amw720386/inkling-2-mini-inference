@@ -1,7 +1,7 @@
 # Launch posts (drafts, not posted)
 
-Every number is from `results/serve_*.json` and `docs/benchmarks.md`. Attach `inkling-launch-1x1.mp4` to the first
-post.
+Every number is from `results/serve_*.json` and `docs/benchmarks.md`. Attach a re-rendered `inkling-launch-1x1.mp4` to the
+first post: the rendered one still shows withdrawn numbers.
 
 ## Thread
 
@@ -9,8 +9,8 @@ post.
 
 We built an inference engine for Inkling-2-Mini, the 26B looped MoE, that fits on one 32 GB GPU.
 
-Single-request decode: 363 tok/s in our published runs, vs 241 for SGLang and 242 for vLLM on the same GPU and the
-same 32 GB budget.
+Single-request decode: 344 tok/s, vs 232 for SGLang and 235 for vLLM on the same GPU and the same 32 GB budget
+(medians over containers).
 
 Python + Triton, open source. Video below.
 
@@ -38,14 +38,14 @@ GSM8K is within noise of SGLang and vLLM (0.83 vs 0.845 / 0.84, n = 200).
 
 **5/**
 
-Where we lose: SGLang serves 4 concurrent requests faster (545 vs 474 tok/s). Our scheduler leaves the GPU idle
-about a third of each 4-request step while Python bookkeeping runs. That is the next fix.
+4 concurrent requests: 571 tok/s, vs 514 for SGLang and 437 for vLLM. It should carry over well to an RTX 5090 (same
+chip, fits in 32 GB), not measured yet.
 
-All numbers are from an RTX PRO 6000, which has the RTX 5090's chip. Real 5090 runs are next.
+All numbers are from an RTX PRO 6000 Blackwell, 32 GB budget per engine.
 
 ## Single post
 
 Inkling-2-Mini (26B looped MoE) on one 32 GB GPU: faster single-request decode than SGLang and vLLM on the
-same card and budget (363 vs 241 / 242 tok/s published). Fused Triton kernels, one CUDA graph per step, DSpark speculation. Open source. Video below.
+same card and budget (344 vs 232 / 235 tok/s). Fused Triton kernels, one CUDA graph per step, DSpark speculation. Open source. Video below.
 
 github.com/amw720386/inkling-2-mini-inference

@@ -1,6 +1,6 @@
 """Pick the race question from the captured runs and write race/race_capture.json.
 
-    python docs/media/src/race/pick.py /tmp/race_raw_ours-fp8.json /tmp/race_raw_sglang.json /tmp/race_raw_vllm.json
+    python docs/media/src/race/pick.py /tmp/race_raw_ours.json /tmp/race_raw_sglang.json /tmp/race_raw_vllm.json
 
 Fixed rule, applied to the warm repeat (rep 1 of 0-1) of every engine, never per engine:
   1. the final answer is correct on all three engines;
@@ -9,7 +9,7 @@ Fixed rule, applied to the warm repeat (rep 1 of 0-1) of every engine, never per
      5%, so the ratio measures speed, not length (greedy outputs differ between FP8 and bf16 engines, more so on long
      answers); the third card shows its own token count. --strict requires all three within 5%;
   4. of those, the question whose speedup (fastest baseline / this engine) is closest to the 6-prompt decode average
-     (--target results: the published 363.1 / 241.6 = 1.50; --target capture: the same 6 prompts re-measured in this
+     (--target results: the published 6-prompt averages; --target capture: the same 6 prompts re-measured in this
      capture), so the race shows a typical question, not the best one.
 Prints every candidate, so the choice can be checked.
 """
@@ -22,8 +22,7 @@ import re
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 REP = 1
-NAMES = {"ours-fp8": ("This engine", 'This engine · <span class="flag">--dense-fp8</span>'),
-         "ours": ("This engine", "This engine · bf16"),
+NAMES = {"ours": ("This engine", "This engine · default"),
          "sglang": ("SGLang", "SGLang · DSpark"), "vllm": ("vLLM 0.34", "vLLM 0.34 · DSpark")}
 
 
@@ -55,12 +54,6 @@ def thinking_len(split):
     return None
 
 
-def decode_rate(run):
-    c, n = run["chunks"], run["usage"]["completion_tokens"]
-    d = c[-1][0] - c[0][0]
-    return (n - 1) / d if d > 0 else 0.0
-
-
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -85,8 +78,8 @@ def main():
         per = []
         for rep in (0, 1):
             rs = [runs[k][(f"bench{i}", rep)] for i in range(6)]
-            tot_t = sum(r["usage"]["completion_tokens"] - 1 for r in rs)
-            tot_s = sum((r["usage"]["completion_tokens"] - 1) / decode_rate(r) for r in rs)
+            tot_t = sum(r["usage"]["completion_tokens"] for r in rs)
+            tot_s = sum(r["t_end"] for r in rs)
             per.append(round(tot_t / tot_s, 1))
         bench[k] = {"overall_tok_s_reps": per, "results_file_tok_s": res[k]}
         print(f"bench6 {k:9s} this capture {per} tok/s   results/ {res[k]}")

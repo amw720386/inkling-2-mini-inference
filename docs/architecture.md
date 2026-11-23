@@ -118,7 +118,7 @@ wait, because none of that depends on the previous kernel.
 - **Prefix reuse:** every slot keeps a snapshot of its last prompt (conv states, rings and drafter context). The
   scheduler routes a request to the slot that holds the longest reusable prefix, so a multi-turn chat only
   prefills its new tokens.
-- **Memory:** all CUDA graphs share one memory pool. The default server profile fits in 32 GiB with 4.5 GiB to
+- **Memory:** all CUDA graphs share one memory pool. The default server profile fits in 32 GiB with 4.6 GiB to
   spare.
 
 ## Testing

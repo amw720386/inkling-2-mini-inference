@@ -22,12 +22,6 @@ def last_number(s):
     return nums[-1].replace(",", "").rstrip(".") if nums else None
 
 
-def decode_rate(chunks, n):
-    """bench/serve_bench.py's decode tok/s: (tokens - 1) / (last chunk - first chunk)."""
-    d = chunks[-1][0] - chunks[0][0]
-    return (n - 1) / d if d > 0 else 0.0
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--capture", default=str(HERE / "race_capture.json"))
@@ -59,7 +53,7 @@ def main():
         ends[e["key"]] = events[-1][0]
         engines.append({"key": e["key"], "name": e["name"], "label": e["label"], "ours": e["key"].startswith("ours"),
                         "events": events, "text": text, "answer_start": e["answer_start"], "tokens": n,
-                        "t_end": events[-1][0], "tok_s": round(decode_rate(chunks, n), 1), "correct": correct})
+                        "t_end": events[-1][0], "tok_s": round(n / events[-1][0], 1), "correct": correct})
 
     ours = next(x for x in engines if x["ours"])
     fastest = min((x for x in engines if not x["ours"]), key=lambda x: x["t_end"])
@@ -77,7 +71,7 @@ def main():
         "punchline": f"Same answer, {ratio:.1f}× sooner than {fastest['name']}.",
         "punchsub": f"This question. 6-prompt average in this run: {b6_ratio:.2f}× vs the faster baseline ({b6_name}).",
         "footer": [f"Answer key: {cap['label']} · request sent to last token · greedy · DSpark on all three",
-                   "RTX PRO 6000 (the RTX 5090's GB202 chip), 32 GB budget per engine"],
+                   "RTX PRO 6000 Blackwell, 32 GB budget per engine"],
         "engines": engines,
         "ratio": round(ratio, 3),
         "bench6_ratio": round(b6_ratio, 3),
