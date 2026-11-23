@@ -37,8 +37,9 @@ const straights = [[xIn, xLoopEnd, 0, 17], [xLoopStart, xLoopEnd, 6, 17], [xLoop
 const LS = straights.reduce((s, [a, b]) => s + (b - a), 0);
 const V = LS / (T1 - T0 - 2 * TA);
 const arc = new THREE.CubicBezierCurve3(
-  new THREE.Vector3(xLoopEnd, 0, 0), new THREE.Vector3(xLoopEnd + 2.6, 4.3, 2.4),
-  new THREE.Vector3(xLoopStart - 2.6, 4.3, 2.4), new THREE.Vector3(xLoopStart, 0, 0));
+  // steep legs and a high apex keep the arc clear of the LOOP and CODA labels
+  new THREE.Vector3(xLoopEnd, 0, 0), new THREE.Vector3(xLoopEnd + 0.6, 4.6, 2.0),
+  new THREE.Vector3(xLoopStart - 0.6, 4.6, 2.0), new THREE.Vector3(xLoopStart, 0, 0));
 const segs = [];                                   // {t0, t1, kind, ...}
 const visits = [];                                 // {layer, t, pass, experts}
 {
@@ -161,6 +162,7 @@ const groupLabels = groups.map(([txt, a, b]) => {
   const m = textLabel(txt, { height: 0.42, color: '#b4c0d2', chip: true });
   m.geometry.translate(m.geometry.parameters.width / 2, 0, 0);   // anchored at its left end, over the group's first layer
   m.position.set(xs[a] - 0.35, PH / 2 + 0.45, 0.2);
+  if (a === 6) m.position.x = xs[a] + 0.8;   // the loop label sits inside the arc, clear of both legs
   scene.add(m); return m;
 });
 
