@@ -123,6 +123,13 @@ serve_ours-fixed.json, serve_ours-bf16-fixed.json, code at 1df95e2, one containe
   GSM8K              0.84                                         0.85
 Not comparable with any best-of-2 number above, SGLang's 528-545 included.
 
+Concurrency against SGLang, same client, 3 containers each on the same day (serve_ours-fixed / -rot6-2 / -rot6-3,
+serve_sglang-rot6 / -rot6-2 / -rot6-3), median of 6 rotations per container:
+  4 requests  577.8 / 563.4 / 579.4   SGLang 538.2 / 513.5 / 530.5   (+9%; rotation 1 is level: 528-545 vs 534-544)
+  2 requests  462.9 / 466.1 / 467.1   SGLang 307.4 / 297.8 / 281.4
+  1 request   334.4 / 421.8 / 413.9   SGLang 233.1 / 225.0 / 224.0   (ours is bimodal, prompt 0 past EOS)
+bf16 at 4 requests has one container only (554.0), inside the noise of SGLang's best.
+
 Widths on dense_fp8 (sched_widths.py, mean of 6 rotations, in process): 4 requests default 613 / width 2 564 /
 4 615 / 8 567 / plain 484; 3 requests default 565 / 488 / 569 / 532; 2 requests default 499 / 404 / 489 / 494.
 The current policy is within noise of the best fixed width in each case; no change. Without the HTTP server the 4-request
