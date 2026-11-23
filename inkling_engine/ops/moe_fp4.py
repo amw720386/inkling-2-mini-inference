@@ -22,6 +22,7 @@ import triton.language as tl
 
 from ..quant import ExpertWeight
 from .moe_triton import _swiglu_pairs_2d, plan_tiles
+from .tuned import autotune
 
 def check_support():
     cap = torch.cuda.get_device_capability()
@@ -140,7 +141,7 @@ def _prune_fp4(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-@triton.autotune(cache_results=True, configs=_FP4_CONFIGS, key=["N", "K", "ACT", "BM"],
+@autotune(configs=_FP4_CONFIGS, key=["N", "K", "ACT", "BM"],
                  prune_configs_by={"early_config_prune": _prune_fp4})
 @triton.jit
 def _grouped_fp4_kernel(

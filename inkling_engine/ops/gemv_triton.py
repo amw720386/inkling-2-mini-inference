@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 
 from .pdl import PDL_ON, PREFETCH_BYTES, enable as _pdl_enable, prefetch_rows_l2
+from .tuned import autotune
 
 MAX_M = 32
 
@@ -21,7 +22,7 @@ _CONFIGS = [
 ]
 
 
-@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
+@autotune(configs=_CONFIGS, key=["N", "K", "MP"])
 @triton.jit
 def _dense_gemv_kernel(X, W, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     if PDL and N <= 16384:  # not the LM head: its rows would push ~200 MB through L2
@@ -96,7 +97,7 @@ def _prune_mm(configs, named_args, **kw):
     return [c for c in configs if k % c.kwargs["BK"] == 0]
 
 
-@triton.autotune(cache_results=True, configs=_MM_CONFIGS, key=["N", "K"], prune_configs_by={"early_config_prune": _prune_mm})
+@autotune(configs=_MM_CONFIGS, key=["N", "K"], prune_configs_by={"early_config_prune": _prune_mm})
 @triton.jit
 def _fp8_mm_kernel(A, As, W, Ws, Out, M, N, K: tl.constexpr, so, BM: tl.constexpr, BN: tl.constexpr,
                    BK: tl.constexpr, GROUP: tl.constexpr = 8):
@@ -139,7 +140,7 @@ def fp8_mm(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
     return out
 
 
-@triton.autotune(cache_results=True, configs=_CONFIGS, key=["N", "K", "MP"])
+@autotune(configs=_CONFIGS, key=["N", "K", "MP"])
 @triton.jit
 def _fp8_gemv_kernel(X, W, Sc, Y, M, N, K, SX, SW, SY, BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Y = (X @ W8^T) * scale[col]; W8 float8_e4m3 [N, K] with one fp32 scale per row."""
@@ -194,7 +195,7 @@ def fp8_gemv(x: torch.Tensor, w: Fp8Weight, out: torch.Tensor) -> torch.Tensor:
 
 
 
-@triton.autotune(cache_results=True, configs=[c for c in _CONFIGS if c.kwargs["BN"] <= 64], key=["N", "K", "MP", "FP8"])
+@autotune(configs=[c for c in _CONFIGS if c.kwargs["BN"] <= 64], key=["N", "K", "MP", "FP8"])
 @triton.jit
 def _seg_gemv_kernel(X, x_stride_in, x_stride_m, W, Sc, Y, M, N, K, SW, SY, B1, B2, B3, B4,
                      BN: tl.constexpr, BK: tl.constexpr, MP: tl.constexpr, FP8: tl.constexpr,

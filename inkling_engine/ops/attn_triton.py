@@ -22,6 +22,7 @@ import triton
 import triton.language as tl
 
 from .pdl import PDL_ON, enable as _pdl_enable, prefetch_l2
+from .tuned import autotune
 
 G4 = 4  # padded GQA group (3 query heads per KV head for Inkling-2-Mini)
 
@@ -67,7 +68,7 @@ _ATTN_CONFIGS = [
 ]
 
 
-@triton.autotune(cache_results=True, configs=_ATTN_CONFIGS, key=["TOK", "NSPLIT", "WINDOW", "RING", "D", "H"])
+@autotune(configs=_ATTN_CONFIGS, key=["TOK", "NSPLIT", "WINDOW", "RING", "D", "H"], pin_args=("KCache",))
 @triton.jit
 def _attn_kernel(
     Q, q_stride_t,  # [T, H, D] (row stride q_stride_t, head stride D)
