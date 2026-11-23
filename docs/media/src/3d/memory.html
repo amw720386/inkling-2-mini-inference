@@ -7,8 +7,6 @@
 <style>
   html, body { margin: 0; width: var(--W); height: var(--H); background: var(--bg); overflow: hidden; }
   canvas { position: absolute; left: 0; top: 0; }
-  #shade { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--H) * 0.34);
-           background: linear-gradient(to bottom, rgba(5,8,15,0) 0%, rgba(5,8,15,0.8) 50%, rgba(5,8,15,0.94) 100%); }
   #text { position: absolute; left: 64px; right: 64px; bottom: 64px; }
   #text .label { margin-bottom: 20px; }
   .swap { position: relative; height: 53px; }
@@ -16,12 +14,14 @@
   .subs { position: relative; height: 30px; margin-top: 14px; }
   .subs > div { position: absolute; left: 0; top: 0; white-space: nowrap; opacity: 0; font-variant-numeric: tabular-nums; }
   .subs code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
-  .tag { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; text-align: center; opacity: 0; }
-  .tag .label { color: #aab6c8; }
-  .tag .v { font: 400 15px/1.2 var(--mono); color: var(--text); margin-top: 6px; letter-spacing: 0.08em; }
-  .tag.kv .label, .tag.kv .v { color: var(--blue-glow); }
-  .tag .stem { width: 1px; height: 18px; margin: 6px auto 0; background: currentColor; opacity: 0.5; }
-  .axis { position: absolute; transform: translate(-50%, 6px); font-size: 13px; color: var(--muted); letter-spacing: 0.12em; white-space: nowrap; }
+  /* segment labels: one baseline under the slab, each with its own leader line */
+  #leaders { position: absolute; left: 0; top: 0; overflow: visible; }
+  .seg { position: absolute; transform: translateX(-50%); white-space: nowrap; text-align: center; }
+  .seg .label { color: #aab6c8; }
+  .seg .v { font: 400 15px/1.2 var(--mono); color: var(--text); margin-top: 6px; letter-spacing: 0.08em; }
+  .seg.kv .label, .seg.kv .v { color: var(--blue-glow); }
+  /* slot numbers on top of the slab */
+  .slot { position: absolute; transform: translate(-50%, -100%); font: 500 15px/1 var(--mono); color: var(--blue-glow); letter-spacing: 0.1em; white-space: nowrap; }
 </style>
 <script src="../lib/scene.js"></script>
 <script type="importmap">
@@ -30,7 +30,7 @@
 </script>
 </head>
 <body>
-<div id="shade"></div>
+<svg id="leaders"></svg>
 <div id="tags"></div>
 <div id="text">
   <div class="label" id="kicker">32 GB · one card</div>
