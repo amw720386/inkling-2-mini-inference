@@ -1,6 +1,6 @@
 """OpenAI-compatible HTTP server for the engine (continuous batching over --slots concurrent requests).
 
-  python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000 [--no-spec] [--dense-fp8]
+  python -m inkling_engine.server --model /path/to/Inkling-2-Mini --port 8000 [--no-spec] [--no-dense-fp8] [--no-fp4-prefill]
 
 Endpoints: GET /v1/models, POST /v1/chat/completions, POST /v1/completions (both with "stream": true).
 Chat output is split into `reasoning_content` (the model's thinking section) and `content`.
@@ -528,12 +528,14 @@ def main():
     ap.add_argument("--max-ctx", type=int, default=32768)
     ap.add_argument("--slots", type=int, default=4, help="concurrent requests (batched decode)")
     ap.add_argument("--no-spec", action="store_true")
-    ap.add_argument("--dense-fp8", action="store_true")
+    ap.add_argument("--dense-fp8", action=argparse.BooleanOptionalAction, default=True,
+                    help="FP8 attention projections + LM head (default on; --no-dense-fp8 for the bf16 checkpoint math)")
     ap.add_argument("--kv-fp8", action="store_true", help="FP8 cache for the full-attention layers (long contexts)")
     ap.add_argument("--prefill-chunk", type=int, default=2048,
                     help="prompt tokens per prefill step (4096: ~5%% faster prefill, longer pauses for other requests)")
-    ap.add_argument("--fp4-prefill", action="store_true",
-                    help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6)")
+    ap.add_argument("--fp4-prefill", action=argparse.BooleanOptionalAction, default=None,
+                    help="NVFP4 activations + FP4 tensor cores for prefill expert GEMMs (Triton >= 3.6; "
+                         "default on when supported, --no-fp4-prefill for bf16 prefill experts)")
     ap.add_argument("--no-vision", action="store_true", help="text only (skips loading the 0.6 GB vision tower)")
     ap.add_argument("--model-id", default="inkling-2-mini")
     ap.add_argument("--default-temperature", type=float, default=None,
@@ -545,10 +547,18 @@ def main():
 
     from .engine import Engine
 
+    if a.fp4_prefill is None:  # default: on where the Triton build supports it
+        from .ops.moe_fp4 import check_support
+        try:
+            check_support()
+            a.fp4_prefill = True
+        except RuntimeError as e:
+            print(f"fp4_prefill off: {e}")
+            a.fp4_prefill = False
     tok = AutoTokenizer.from_pretrained(a.model)
     eng = Engine(a.model, max_ctx=a.max_ctx, spec=not a.no_spec, dense_fp8=a.dense_fp8,
                  kv_fp8=a.kv_fp8, slots=a.slots, vision=not a.no_vision,
-                 fp4_prefill=a.fp4_prefill or None, prefill_chunk=a.prefill_chunk)
+                 fp4_prefill=a.fp4_prefill, prefill_chunk=a.prefill_chunk)
     defaults = generation_defaults(a.model)
     if a.default_temperature is not None:
         defaults["temperature"] = a.default_temperature

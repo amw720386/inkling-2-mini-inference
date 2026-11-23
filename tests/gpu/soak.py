@@ -7,6 +7,7 @@ not grow between waves.
 
 import json
 import random
+import os
 import sys
 import threading
 import time
@@ -28,7 +29,8 @@ from transformers import AutoTokenizer  # noqa: E402
 import uvicorn  # noqa: E402
 
 tok = AutoTokenizer.from_pretrained(path)
-eng = Engine(path, max_ctx=16384, spec=True, slots=4, vision=False)
+eng = Engine(path, max_ctx=16384, spec=True, slots=4, vision=False,
+             dense_fp8=os.environ.get("BF16") != "1", fp4_prefill=os.environ.get("BF16") != "1")  # server defaults
 server = Server(eng, tok, "inkling-2-mini")
 srv = uvicorn.Server(uvicorn.Config(build_app(server), host="127.0.0.1", port=8012, log_level="warning"))
 threading.Thread(target=srv.run, daemon=True).start()

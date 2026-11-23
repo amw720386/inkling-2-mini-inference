@@ -95,6 +95,15 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   previous kernel; local layers unchanged. Prefill bf16 30k 1998 -> 1892 ms (fp4_prefill 1537, both 1425);
   8k unchanged (467). longctx.py: 131k prefill 26.3 -> 15.0 s, decode at 131k plain 112 -> 118, DSpark 123 -> 189.
 
+## Server default: --dense-fp8 --fp4-prefill
+The server now runs FP8 dense weights and FP4 prefill experts by default (--no-dense-fp8 / --no-fp4-prefill
+give the bf16 checkpoint math; fp4_prefill falls back to off when Triton < 3.6). The engine API defaults are
+unchanged (bf16), so the plain==sglang parity checks still cover the bf16 path. Server benchmarks, same GPU:
+bf16 profile 532.5 / 474.0 tok/s at 4 / 2 concurrent, greedy 325.5, T=1 259.8, TTFT 1k/4k/8k/30k
+66 / 231 / 468 / 1884 ms, GSM8K 0.855; FP8 + FP4 profile 542.6 / 528.5, greedy 385.1, T=1 306.3,
+TTFT 49 / 169 / 352 / 1551 ms, GSM8K 0.84. SGLang: 528-545 / 278-338, greedy 241, T=1 201,
+TTFT 94 / 222 / 432 / 1670.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.

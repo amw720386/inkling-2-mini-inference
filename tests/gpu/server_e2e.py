@@ -5,6 +5,7 @@ reuse the cached prefix), raw completion, a sampled request, and the models list
 """
 
 import json
+import os
 import sys
 import threading
 import time
@@ -24,7 +25,8 @@ from transformers import AutoTokenizer  # noqa: E402
 import uvicorn  # noqa: E402
 
 tok = AutoTokenizer.from_pretrained(path)
-eng = Engine(path, max_ctx=32768, spec=True, vision=True, slots=2)
+eng = Engine(path, max_ctx=32768, spec=True, vision=True, slots=2,
+             dense_fp8=os.environ.get("BF16") != "1", fp4_prefill=os.environ.get("BF16") != "1")  # server defaults
 server = Server(eng, tok, "inkling-2-mini")
 app = build_app(server)
 cfg = uvicorn.Config(app, host="127.0.0.1", port=8011, log_level="warning")

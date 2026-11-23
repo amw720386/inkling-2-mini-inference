@@ -1,7 +1,7 @@
 """Same-GPU, same-client comparison: this engine vs SGLang vs vLLM serving Inkling-2-Mini.
 
     modal run modal/serve_bench.py --engine ours          # bf16, DSpark, defaults
-    modal run modal/serve_bench.py --engine ours-fp8      # --dense-fp8
+    modal run modal/serve_bench.py --engine ours-bf16     # --no-dense-fp8 --no-fp4-prefill
     modal run modal/serve_bench.py --engine ours --extra "--fp4-prefill" --tag fp4
     modal run modal/serve_bench.py --engine sglang        # lmsysorg/sglang:inkling-2-mini, DSpark recipe
     modal run modal/serve_bench.py --engine vllm          # vllm/vllm-openai nightly, DSpark recipe
@@ -161,6 +161,7 @@ def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = "")
     xs = extra.split() if extra else []
     cl = tuple(client.split()) if client else ()
     fn = {"ours": lambda: run_ours.remote(xs, cl), "ours-fp8": lambda: run_ours.remote(["--dense-fp8"] + xs, cl),
+          "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl),
           "sglang": lambda: run_sglang.remote(xs, cl), "vllm": lambda: run_vllm.remote(xs, cl)}[engine]
     res = fn()
     out = ROOT / "results" / f"serve_{engine}{'-' + tag if tag else ''}.json"
