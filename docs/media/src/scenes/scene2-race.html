@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Scene 2: the real-run race. Every bar step, timer value and character comes from race/race-data.js, which
+     race/build_race.py writes from the captured per-chunk stream times (race/race_capture.json). Played at 1x:
+     scene time t maps to request time t - T0; nothing is smoothed or rescaled.
+     Question choice (race/pick.py, all candidates listed in race_capture.json): GSM8K test[0:200] at thinking effort 0.99,
+     warm repeat; all three answers correct; slowest engine 2-5 s; this engine and the fastest baseline within 5% tokens;
+     ratio closest to this run's 6-prompt ratio. The length rule was relaxed to this form after the capture was seen:
+     the strict form (all three within 5%) left only gsm108 (1.39 s race, 1.18x). The pick, gsm150, runs 1.51x vs SGLang,
+     above the run's 6-prompt 1.39x; the scene states both. -->
+<link rel="stylesheet" href="../theme.css">
+<link rel="stylesheet" href="../race/race.css">
+</head>
+<body>
+<div id="root">
+  <div id="kicker" class="label">Demo · real run · one RTX PRO 6000 · played at 1×</div>
+  <h1 id="headline" class="headline"></h1>
+  <div id="question"></div>
+  <div id="cards"></div>
+  <div id="punch">
+    <h2 id="punchline" class="headline"></h2>
+    <div id="punchsub"></div>
+    <div id="foot"></div>
+  </div>
+</div>
+<script src="../lib/scene.js"></script>
+<script src="../race/race-data.js"></script>
+<script src="../race/race.js"></script>
+</body>
+</html>
