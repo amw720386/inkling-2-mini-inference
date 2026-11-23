@@ -75,6 +75,11 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
 - SGLang today (same container type): 4 requests 528.5 (runs 411.5 / 528.5), 2 requests 278; its log shows
   accept length 2.7-2.9 at 4 running requests with 8 draft tokens.
 
+- Pre-draft: a batched round launches the next round's multi-slot draft (same requests, new anchors and
+  positions) before returning, so the GPU drafts while the host hands out tokens; the next round reuses it when
+  nothing changed (a stale pre-draft only writes draft-block KV that the next draft rewrites). Through the
+  server, in-container: 516/517/519 -> 532/532/538 tok/s at 4 requests, level with direct (536-538).
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.

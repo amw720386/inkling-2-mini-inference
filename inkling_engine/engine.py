@@ -320,6 +320,9 @@ class Engine:
     WIDE_PAIR_ACCEPT = 1.0  # mean recent accepted drafts per round of a 2-request batch for width 8 (1.0: 482 vs
     # 472 tok/s for 1.5 on prompts 0-1, level on the others)
 
+    predraft = True  # batched rounds launch the next round's multi-slot draft before returning
+    predraft_key = None
+
     def _pick_width_batched(self, reqs) -> int:
         if len(reqs) == 2 and sum(getattr(r, "accept_ema", 0.0) for r in reqs) / 2 >= self.WIDE_PAIR_ACCEPT:
             return 8
@@ -533,10 +536,15 @@ class Engine:
         drafts = []
         self.harvest_costs()
         k = len(reqs)
-        ev = self.timer.start(("draft", k)) if self.verify_costs else None
-        multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs],
-                              [self._draft_temp(r.sp) for r in reqs], [r.slot for r in reqs])
-        self.timer.stop(("draft", k), ev)
+        temps = [self._draft_temp(r.sp) for r in reqs]
+        key = (tuple(r.slot for r in reqs), tuple(r.P for r in reqs), tuple(r.out[-1] for r in reqs), tuple(temps))
+        if self.predraft_key == key:  # launched at the end of the previous round, already running or done
+            multi = [(d.m_tok[i], d.m_conf[i], d.m_cand[i], d.m_heads.logits[i]) for i in range(k)]
+        else:
+            ev = self.timer.start(("draft", k)) if self.verify_costs else None
+            multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs], temps, [r.slot for r in reqs])
+            self.timer.stop(("draft", k), ev)
+        self.predraft_key = None
         for r, (tok, conf, cand, lg_c) in zip(reqs, multi):
             q = torch.softmax(lg_c / self._draft_temp(r.sp), -1) if r.sp.temperature > 0 else None
             drafts.append((tok, conf, cand if q is not None else None, q))
@@ -586,6 +594,13 @@ class Engine:
             r.stats.accepted += a
             r.stats.widths[m] = r.stats.widths.get(m, 0) + 1
             out.append((drafted[i][:a] + [nxt], commit))
+        if self.predraft:
+            # the next round's drafts (same requests, their new anchors / positions) go to the GPU now, so it drafts
+            # while the host hands out this round's tokens; the next round uses them if nothing changed
+            nP = [r.P + c for r, (_, c) in zip(reqs, out)]
+            nA = [toks[-1] for toks, _ in out]
+            d.draft_multi(nA, nP, temps, [r.slot for r in reqs])
+            self.predraft_key = (tuple(r.slot for r in reqs), tuple(nP), tuple(nA), tuple(temps))
         return out
 
     # sampled requests draft at temperature * scale; acceptance stays exact for any scale > 0. 0.8 measured best

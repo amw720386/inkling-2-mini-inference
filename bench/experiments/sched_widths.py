@@ -18,7 +18,9 @@ from inkling_engine.scheduler import Scheduler  # noqa: E402
 k = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 total = torch.cuda.get_device_properties(0).total_memory
 torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
-eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4)
+import os  # noqa: E402
+
+eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4, dense_fp8=os.environ.get("FP8") == "1")
 sched = Scheduler(eng)
 items = json.load(open("/root/tests/reference/sglang_ref.json"))["items"]
 prompts = [it["input_ids"] for it in items[:6]]
