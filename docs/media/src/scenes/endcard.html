@@ -50,7 +50,10 @@
   window.SCENE = { duration: 3.5 };
   const bars = [...document.querySelectorAll('.bar')], vals = [...document.querySelectorAll('.v')];
   const XMAX = 400;  // axis 0..400 tok/s; bars start at zero
-  window.renderFrame = t => {
+  // LEAD-IN: the joined video cross-fades into this scene, so content starts 0.3 s early (0.15 s blank).
+  const LEAD = 0.3;
+  window.renderFrame = t0 => {
+    const t = t0 + LEAD;
     els.forEach((e, i) => S.fadeUp(e, t, starts[i], null, 0.5));
     bars.forEach((b, i) => {
       const k = S.ramp(t, 1.0 + 0.08 * i, 0.9), pct = 100 * (+b.dataset.v / XMAX) * k;
