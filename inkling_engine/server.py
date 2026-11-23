@@ -347,7 +347,8 @@ def build_app(server: Server):
 
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
         n_lp = requested_logprobs(body, chat)
-        req = server.sched.submit(ids, max_new, server.stop_ids, server.sampling(body), on_token, image_feats,
+        stop_ids = set() if body.get("ignore_eos") else server.stop_ids  # ignore_eos: always max_tokens (benchmarks)
+        req = server.sched.submit(ids, max_new, stop_ids, server.sampling(body), on_token, image_feats,
                                   logprobs=n_lp, constraint=constraint)
         lp_sent = 0
 
