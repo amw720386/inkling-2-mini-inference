@@ -1,14 +1,13 @@
 """Same-GPU, same-client comparison: this engine vs SGLang vs vLLM serving Inkling-2-Mini.
 
-    modal run modal/serve_bench.py --engine ours          # bf16, DSpark, defaults
+    modal run modal/serve_bench.py --engine ours          # FP8 dense + FP4 prefill, DSpark (the server default)
     modal run modal/serve_bench.py --engine ours-bf16     # --no-dense-fp8 --no-fp4-prefill
-    modal run modal/serve_bench.py --engine ours --extra "--fp4-prefill" --tag fp4
+    modal run modal/serve_bench.py --engine ours --tag 2  # another container: results/serve_ours-2.json
     modal run modal/serve_bench.py --engine sglang        # lmsysorg/sglang:inkling-2-mini, DSpark recipe
     modal run modal/serve_bench.py --engine vllm          # vllm/vllm-openai nightly, DSpark recipe
 
-Each server runs on an RTX PRO 6000 (GB202 / sm_120, the RTX 5090's chip) held to a 32 GB budget, and
+Each server runs on an RTX PRO 6000 Blackwell (GB202 / sm_120) held to a 32 GB budget, and
 `bench/serve_bench.py` measures it through /v1/completions. Results land in results/serve_<engine>.json locally.
-These are proxy numbers for an RTX 5090, not RTX 5090 measurements.
 """
 
 from __future__ import annotations
@@ -160,8 +159,7 @@ def run_vllm(extra: list[str], client: tuple = ()):
 def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = ""):
     xs = extra.split() if extra else []
     cl = tuple(client.split()) if client else ()
-    fn = {"ours": lambda: run_ours.remote(xs, cl), "ours-fp8": lambda: run_ours.remote(["--dense-fp8"] + xs, cl),
-          "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl),
+    fn = {"ours": lambda: run_ours.remote(xs, cl), "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl),
           "sglang": lambda: run_sglang.remote(xs, cl), "vllm": lambda: run_vllm.remote(xs, cl)}[engine]
     res = fn()
     out = ROOT / "results" / f"serve_{engine}{'-' + tag if tag else ''}.json"

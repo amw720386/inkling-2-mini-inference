@@ -58,7 +58,7 @@ step's logits. Logprobs are the model's distribution before temperature and top-
 
 | Goal | Flags | Notes |
 |---|---|---|
-| Speed | (none) | FP8 dense weights and FP4 prefill. GeForce runs bf16 with fp32 accumulation at half rate, so on a 5090 the FP8 / FP4 paths should matter more than on the proxy |
+| Speed | (none) | FP8 dense weights and FP4 prefill. |
 | Checkpoint math | `--no-dense-fp8 --no-fp4-prefill` | bf16 dense layers and prefill experts, as transformers computes them |
 | Long context | `--kv-fp8 --max-ctx 262144 --slots 1 --no-vision` | 256k context in 32 GiB |
 

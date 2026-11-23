@@ -1,7 +1,6 @@
 """Modal entry points for engine development on an sm_120 GPU.
 
-RTX 5090 is not offered on Modal; RTX-PRO-6000 is the same GB202 / sm_120 chip with
-96 GB. Results from it are labelled as a proxy, never as RTX 5090 numbers.
+The target is an RTX PRO 6000 Blackwell (GB202 / sm_120, 96 GB), used within a 32 GB budget.
 
   modal run modal/engine_app.py::parity          # engine vs transformers logits
   modal run modal/engine_app.py::pytest_gpu --args "-k moe"   # GPU unit tests

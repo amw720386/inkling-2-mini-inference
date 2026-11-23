@@ -1,47 +1,64 @@
 """Markdown comparison table from results/serve_*.json (python tools/results_table.py).
 
-The README and docs/benchmarks.md tables are pasted from this output, so every number traces to a result file.
+Each engine has one file per benchmark container (serve_ours.json, serve_ours-2.json, ...). A cell is the median over
+the containers that measured it. The README and docs/benchmarks.md tables are pasted from this output, so every number
+traces to a result file. `--spread` prints each container's value instead.
 """
 
 import json
 import pathlib
+import re
+import statistics
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ENGINES = [
-    ("serve_ours.json", "this engine"),
-    ("serve_ours-fp8.json", "this engine, `--dense-fp8`"),
-    ("serve_ours-fp4.json", "this engine, `--fp4-prefill`"),
-    ("serve_vllm.json", "vLLM"),
-    ("serve_sglang.json", "SGLang"),
+ENGINES = [("ours", "this engine"), ("ours-bf16", "this engine, bf16"), ("vllm", "vLLM"), ("sglang", "SGLang")]
+METRICS = [  # (column, path, unit)
+    ("decode, greedy", ("decode_greedy", "overall_tok_s"), ""), ("decode, T=1", ("decode_t1", "overall_tok_s"), ""),
+    ("2 concurrent", ("concurrency", "2", "aggregate_tok_s"), ""),
+    ("4 concurrent", ("concurrency", "4", "aggregate_tok_s"), ""),
+    ("TTFT 1k", ("ttft", "1024", "ttft_ms"), " ms"), ("TTFT 4k", ("ttft", "4096", "ttft_ms"), " ms"),
+    ("TTFT 8k", ("ttft", "8192", "ttft_ms"), " ms"), ("TTFT 30k", ("ttft", "30000", "ttft_ms"), " ms"),
+    ("GSM8K", ("gsm8k", "accuracy"), ""), ("peak GPU", ("peak_gpu_mib",), " GiB"),
 ]
 
 
-def get(r, *path, fmt="{:.0f}"):
-    for p in path:
-        if not isinstance(r, dict) or p not in r:
-            return "-"
-        r = r[p]
-    return fmt.format(r)
+def containers(engine):
+    """Result files of one engine, one per container."""
+    pat = re.compile(rf"serve_{engine}(-\d+)?\.json$")
+    files = sorted(p for p in (ROOT / "results").glob("serve_*.json") if pat.match(p.name))
+    return [r for r in (json.loads(p.read_text()) for p in files) if "error" not in r]
+
+
+def values(runs, path):
+    out = []
+    for r in runs:
+        for p in path:
+            r = r.get(p) if isinstance(r, dict) else None
+        if r is not None:
+            out.append(r / 1024 if path == ("peak_gpu_mib",) else r)
+    return out
+
+
+def median(engine, path):
+    v = values(containers(engine), path)
+    return statistics.median(v) if v else None
 
 
 def main():
-    head = ["", "decode, greedy", "decode, T=1", "TTFT 1k", "TTFT 4k", "TTFT 8k", "TTFT 30k",
-            "2 / 4 concurrent", "GSM8K", "peak GPU"]
-    lines = ["| " + " | ".join(head) + " |", "|" + "---|" + "---:|" * (len(head) - 1)]
-    for fname, label in ENGINES:
-        p = ROOT / "results" / fname
-        if not p.exists():
-            continue
-        r = json.loads(p.read_text())
-        if "error" in r:
-            continue
-        ttft = [get(r, "ttft", n, "ttft_ms") for n in ("1024", "4096", "8192", "30000")]
-        conc = f"{get(r, 'concurrency', '2', 'aggregate_tok_s')} / {get(r, 'concurrency', '4', 'aggregate_tok_s')}"
-        row = [label, get(r, "decode_greedy", "overall_tok_s"), get(r, "decode_t1", "overall_tok_s"),
-               *[t + " ms" if t != "-" else t for t in ttft], conc, get(r, "gsm8k", "accuracy", fmt="{:.3f}"),
-               f"{r['peak_gpu_mib'] / 1024:.1f} GiB"]
-        lines.append("| " + " | ".join(row) + " |")
-    print("\n".join(lines))
+    spread = "--spread" in sys.argv
+    print("| | " + " | ".join(m[0] for m in METRICS) + " |")
+    print("|---|" + "---:|" * len(METRICS))
+    for engine, label in ENGINES:
+        runs, cells = containers(engine), []
+        for name, path, unit in METRICS:
+            v = values(runs, path)
+            fmt = "{:.3f}" if name == "GSM8K" else "{:.1f}" if unit == " GiB" else "{:.0f}"
+            if path == ("peak_gpu_mib",) and v:
+                v = [max(v)]
+            cells.append("-" if not v else " / ".join(fmt.format(x) for x in v) + unit if spread
+                         else fmt.format(statistics.median(v)) + unit)
+        print(f"| {label} ({len(runs)}) | " + " | ".join(cells) + " |")
 
 
 if __name__ == "__main__":

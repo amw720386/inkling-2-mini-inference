@@ -1,7 +1,7 @@
 """End-to-end generation: plain vs DSpark greedy, vs SGLang's reference outputs, with timing.
 
 Modal: modal run modal/engine_app.py::parity --args "bench_spec.py [n_new]"
-Memory capped to 32 GiB (RTX 5090 emulation on an RTX PRO 6000; proxy numbers).
+Memory capped to 32 GiB on an RTX PRO 6000.
 """
 
 import json

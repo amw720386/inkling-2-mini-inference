@@ -1,7 +1,7 @@
 [project]
 name = "inkling-engine"
 version = "0.1.0"
-description = "Single-GPU Inkling-2-Mini inference engine tuned for the RTX 5090"
+description = "Single-GPU Inkling-2-Mini inference engine tuned for the RTX PRO 6000 Blackwell"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 readme = "README.md"

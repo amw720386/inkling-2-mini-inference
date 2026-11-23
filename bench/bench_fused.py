@@ -1,7 +1,7 @@
 """Fused forward: correctness vs the reference model, then CUDA-graph decode timing.
 
 Modal: modal run modal/engine_app.py::parity --args "bench_fused.py [ctx] [profile]"
-Memory capped to 32 GiB (RTX 5090 emulation on an RTX PRO 6000; proxy numbers).
+Memory capped to 32 GiB on an RTX PRO 6000.
 """
 
 from __future__ import annotations

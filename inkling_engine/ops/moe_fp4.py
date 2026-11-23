@@ -8,7 +8,8 @@ values, and per block the better of a 6.0- and a 4.0-based scale ("four over six
 trimmed port of its `nvfp4_quantize` (row-major scales, hardware e2m1 conversion only).
 
 Activation quantization changes the numerics (it is what SGLang / vLLM do on this model, not what the bf16
-checkpoint math does), so the path is opt-in. Only the NVFP4 layers use it; MXFP8 layers stay on bf16.
+checkpoint math does), so the engine API leaves it off and the server turns it on.
+Only the NVFP4 layers use it; MXFP8 layers stay on bf16.
 """
 
 from __future__ import annotations

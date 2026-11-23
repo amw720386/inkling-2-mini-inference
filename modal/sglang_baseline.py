@@ -1,5 +1,5 @@
 """SGLang reference baseline for Inkling-2-Mini on a Modal RTX PRO 6000 (GB202 / sm_120),
-memory-capped to emulate a 32 GB RTX 5090.
+memory-capped to 32 GB.
 
 Usage:
   modal run modal/sglang_baseline.py --mode probe --config balanced --mem-frac 0.26
@@ -9,8 +9,7 @@ Usage:
 All results are written to the `inkling2-mini-weights` volume under /weights/results/ and
 returned to the local entrypoint, which saves small JSON files locally.
 
-NOTE: numbers produced here are "RTX PRO 6000 (sm_120) proxy, memory-capped to 32 GB",
-never RTX 5090 results.
+Numbers produced here are RTX PRO 6000 results, memory-capped to 32 GB.
 """
 import json
 import os
