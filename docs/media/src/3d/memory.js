@@ -2,12 +2,17 @@
 // Beat 1: the default server profile, four 32k KV slots as four separate blocks. Beat 2: the slots slide together
 // and merge into the single 256k FP8 slot of the long-context profile.
 //
-// Totals are measured (docs/benchmarks.md): default server (4 slots x 32k, DSpark, vision) 26.4 GiB after start,
-// 28.8 GiB peak; long context (--kv-fp8 --max-ctx 262144 --slots 1 --no-vision) 25.3 GiB after start, 28.6 peak.
+// Totals are measured (docs/benchmarks.md, tests/gpu/memcheck.py, server defaults: FP8 dense weights, FP4 prefill,
+// DSpark, vision): 4 slots x 32k: 25.9 GiB after start, 27.4 GiB peak; --kv-fp8 --max-ctx 262144 --slots 1:
+// 24.9 GiB after start, 27.1 GiB peak (with a 30k prefill).
 // Segments inside those totals are computed (1 GiB = 2^30 B):
-//   weights      = checkpoint files on the Hub: model-00001-of-00001.safetensors 19,526,019,168 B = 18.185 GiB,
-//                  DSpark drafter mtp.safetensors 635,801,416 B = 0.592 GiB -> 18.78 GiB;
-//                  --no-vision drops the 0.6 GB vision tower (docs/serving.md; 0.6e9 B = 0.56 GiB) -> 18.22 GiB
+//   weights      = checkpoint files on the Hub: model-00001-of-00001.safetensors 19,526,019,168 B = 18.185 GiB +
+//                  DSpark drafter mtp.safetensors 635,801,416 B = 0.592 GiB = 18.777 GiB as bf16, then the FP8
+//                  default (inkling_engine/fused_model.py, compact()): the padded attention projections
+//                  (20 x 8640 + 4 x 8768 = 207,872 rows x 2304) and wo (24 x 2304 x 3072) become row-scaled E4M3
+//                  (1 B per weight + a 4 B scale per row) and the bf16 copies are dropped: -0.445 and -0.158 GiB;
+//                  the LM head keeps its bf16 copy and adds an FP8 one (201,024 x 2304 + scales): +0.432 GiB
+//                  -> 18.61 GiB in both profiles (both keep vision)
 //   KV per slot  = CacheSpec.bytes (inkling_engine/cache.py): full-attention KV 2 * 1024 * 2 B * 8 visits * 32768
 //                  = 1,073,741,824 B = 1.000 GiB, plus sliding rings 4 * 1024 * 40 visits * 1088 = 178,257,920 B
 //                  = 0.166 GiB -> 1.166 GiB per slot, x 4 slots;
@@ -24,8 +29,9 @@ const wide = W / H > 1.3;
 
 // ---- the two layouts (GiB) ----------------------------------------------------------------------------------
 const SLOT = 1.0 + 0.166, FP8SLOT = 4.0 + 0.166;
-const A = { weights: 18.185 + 0.592, slots: [SLOT, SLOT, SLOT, SLOT], after: 26.4, peak: 28.8 };
-const B = { weights: 18.185 + 0.592 - 0.56, slots: [FP8SLOT / 4, FP8SLOT / 4, FP8SLOT / 4, FP8SLOT / 4], after: 25.3, peak: 28.6 };
+const WEIGHTS = 18.185 + 0.592 - 0.445 - 0.158 + 0.432;   // FP8 default, see the header
+const A = { weights: WEIGHTS, slots: [SLOT, SLOT, SLOT, SLOT], after: 25.9, peak: 27.4 };
+const B = { weights: WEIGHTS, slots: [FP8SLOT / 4, FP8SLOT / 4, FP8SLOT / 4, FP8SLOT / 4], after: 24.9, peak: 27.1 };
 for (const P of [A, B]) {
   P.kv = P.slots.reduce((s, x) => s + x, 0);
   P.graphs = P.after - P.weights - P.kv;

@@ -43,9 +43,8 @@ Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before re
 
 - Re-render the video and `race.gif`. The race data is an earlier engine's `--dense-fp8` run and its tok/s used the
   old timing; re-capture with `race/capture.py --engines ours,sglang,vllm`, then `pick.py` and `build_race.py`.
-- Memory scene, `memory.gif` and the `memory-layout` diagrams show the bf16 profile. The FP8 default measures
-  25.9 GiB after start, 27.4 GiB peak (`tests/gpu/memcheck.py`); its weights are smaller, so the segments need
-  new sizes.
+- `memory-layout` diagrams show the bf16 profile. The FP8 default measures 25.9 GiB after start, 27.4 GiB peak
+  (`tests/gpu/memcheck.py`); the memory scene and `memory.gif` use these numbers and FP8 weight sizes (18.6 GiB).
 - Drop or redraw `scheduler.gif`: its idle-GPU claim is wrong (a trace shows the GPU busy 91-94% of the time).
 - `render_modal.py` is meant to run `render.sh` on a Modal container. It has not been run yet.
 
@@ -119,7 +118,8 @@ Blackwell. 4 concurrent requests: 571 tok/s vs 514 (SGLang) and 437 (vLLM).`
 
 Caps label `32 GB · ONE CARD`. A 32 GiB bar (or 3D slab) filling: weights, then four 32k KV slots (blue), CUDA
 graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into one long FP8 slot. Headline:
-`Or 256k on one card.` Small numbers: `26.4 GiB after start · 28.8 GiB peak` → `25.3 / 28.6 GiB with --kv-fp8`.
+`Or 256k on one card.` Small numbers: `25.9 GiB after start · 27.4 GiB peak` → `24.9 / 27.1 GiB with --kv-fp8`
+(server defaults: FP8 dense weights, FP4 prefill; segment arithmetic in `src/3d/memory.js`).
 
 ### Scene 5: end card, 20.2-23.7 s
 
