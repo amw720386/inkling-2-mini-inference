@@ -1,8 +1,9 @@
 """Per-kernel profile of real batched DSpark rounds (k distinct greedy sequences, width m): draft_multi, verify(k, m),
-commits. Modal: parity --args "INKLING_PDL=0 prof_verify_batch.py [k] [m]"
+commits. Modal: parity --args "INKLING_PDL=0 prof_verify_batch.py [k] [m]" (FP8=1: dense_fp8)
 """
 
 import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ k = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 m = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 total = torch.cuda.get_device_properties(0).total_memory
 torch.cuda.set_per_process_memory_fraction(min(1.0, 32 * 2**30 / total))
-eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4)
+eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4, dense_fp8=os.environ.get("FP8") == "1")
 eng._pick_width_batched = lambda reqs: m
 items = json.load(open("/root/tests/reference/sglang_ref.json"))["items"]
 reqs = []
