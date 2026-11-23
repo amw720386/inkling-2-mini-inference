@@ -5,19 +5,34 @@
 [![GPU: RTX 5090 (sm_120)](https://img.shields.io/badge/GPU-RTX%205090%20(sm__120)-76b900.svg)](docs/benchmarks.md)
 
 A single-GPU inference engine for [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini), the
-26B-parameter looped MoE from Thinking Machines (3.4B active per token), built for one 32 GB RTX 5090. It is Python
-and Triton on PyTorch, with an OpenAI-compatible server. Decode uses fused kernels, CUDA graphs and DSpark
+26B-parameter looped MoE from Thinking Machines (3.4B active per token), being built for one 32 GB RTX 5090. It is
+Python and Triton on PyTorch, with an OpenAI-compatible server. Decode uses fused kernels, CUDA graphs and DSpark
 speculative decoding. The model math follows SGLang's implementation.
 
-On the same GPU, held to the same 32 GB budget, and measured with the same client:
+> **Work in progress.** This is an active project, not a finished result. The numbers below are a snapshot from
+> 2026-11-22 on a stand-in GPU (an RTX PRO 6000 with the RTX 5090's chip). It already wins some comparisons and
+> clearly loses others. It has not been run on an actual RTX 5090 yet.
 
-- **Faster single-request decode than SGLang and vLLM:**
+## Where it stands
+
+**Ahead so far** (same GPU, same 32 GB budget, same client):
+
+- **Single-request decode** is faster than SGLang and vLLM:
   - greedy: 280 vs 241 / 242 tok/s, or 363 with `--dense-fp8`
   - temperature 1: 262 vs 201 / 206 tok/s
-- **More context in 32 GB:** four slots of 32k tokens each. SGLang's 32 GB recipe caps a request at about 31.7k
-  tokens, and vLLM had room for about 6.9k tokens in total.
-- **256k context fits on one card**, with an FP8 cache for the full-attention layers.
-- **GSM8K within noise of both** (0.825-0.835 vs 0.840 / 0.845, n = 200).
+- **More context in 32 GB:** four slots of 32k tokens each, and 256k on one card with an FP8 cache.
+- **GSM8K** is within noise of both (0.825-0.835 vs 0.840 / 0.845, n = 200).
+
+**Behind, and being worked on:**
+
+- **4 concurrent requests:** SGLang is about 15% faster (545 vs 454-474 tok/s), and our throughput dips from 2 to
+  4 requests. The cause is the scheduler: it leaves the GPU idle about a third of each 4-request step while Python
+  bookkeeping runs (`bench/experiments/sched_breakdown.py`). The fix, overlapping that work with the GPU, is in
+  progress.
+- **Default prefill** is slower than SGLang beyond 4k tokens, because it keeps the checkpoint's bf16 math for the
+  expert inputs. `--fp4-prefill` quantizes them to FP4 the way SGLang and vLLM do, and is faster than both.
+- **No real RTX 5090 numbers yet.** GeForce cards run bf16 with fp32 accumulation at half rate, so bf16 prefill may
+  look worse there.
 
 ![comparison](docs/img/comparison.png)
 
@@ -29,14 +44,8 @@ On the same GPU, held to the same 32 GB budget, and measured with the same clien
 | vLLM 0.34 nightly | 242 tok/s | 206 tok/s | **183 ms** | does not fit | 243 tok/s | 0.840 |
 | SGLang (Inkling image) | 241 tok/s | 201 tok/s | 222 ms | 432 ms | **545 tok/s** | 0.845 |
 
-**Hardware.** All numbers come from an RTX PRO 6000 Blackwell on Modal. It has the RTX 5090's GB202 / sm_120 chip,
-and each engine was held to a 32 GB budget. **They are proxy numbers, not RTX 5090 measurements.**
-
-**Where it loses:**
-- **4 concurrent requests:** SGLang serves them about 15% faster, and our throughput dips slightly from 2 to 4
-  requests (work in progress).
-- **Default prefill:** it keeps the checkpoint's bf16 math for the expert inputs, and is slower than SGLang beyond
-  4k tokens. SGLang and vLLM quantize those inputs to FP4; `--fp4-prefill` does the same and is faster than both.
+All numbers come from an RTX PRO 6000 Blackwell on Modal, with each engine held to a 32 GB budget. **They are
+proxy numbers, not RTX 5090 measurements.**
 
 Details:
 
@@ -77,11 +86,18 @@ modal run modal/serve_bench.py --engine ours               # also: ours-fp8, sgl
 python tools/results_table.py && python tools/plot_comparison.py
 ```
 
-## TODO
+## Roadmap
 
-- 4 concurrent requests at least level with SGLang
-- measurements on a real RTX 5090
+In progress:
+
+- Overlap the scheduler's per-step work with the GPU, to get 4 concurrent requests at least level with SGLang
+- Small decode-step wins (fused per-visit kernels, verify cost)
+
+Next:
+
+- Measurements on a real RTX 5090
 - `--fp4-prefill` without the slight drop in speculative acceptance after an FP4 prefill
+- Re-run the comparison as SGLang and vLLM update their Inkling support
 
 ## Credits
 
