@@ -117,7 +117,11 @@ Chunk size (`bench_prefill.py 8192 <chunk> sweep`, one machine): 2048 -> 4096 to
 `dense_fp8` 469 -> 449, `fp4_prefill` 404 -> 381, both 374 -> 357 ms. `--prefill-chunk 4096` is an option; the
 default stays 2048 because a chunk blocks the other slots' decode steps for its duration. The prefill message
 gates' rank-64 up projections then moved from 3xTF32 to plain bf16 MMAs (both operands are bf16, so the products are
-exact): 2048-token chunks 499 / 469 / 404 / 374 -> 481 / 451 / 387 / 357 ms (bf16 / dense_fp8 / fp4 / both).
+exact): 2048-token chunks 499 / 469 / 404 / 374 -> 481 / 451 / 387 / 357 ms (bf16 / dense_fp8 / fp4 / both). The
+one-tile depth attention (good for decode) had slowed prefill's depth attention 6.8 -> 16.5 ms (registers, thousands
+of programs); prefill-sized steps use the per-source loop again: 469 / 439 / 373 / 343 ms. A 3 x bf16 split of the fp32 router weights
+(instead of 3xTF32) was 1.6x faster but 30x less accurate than fp32 (3.4e-5 vs 1.2e-6 max error on unit logits),
+too loose for routing; dropped.
 
 Short prompts (`tests/gpu/bench_ttft.py`): eager prefill launches ~800 kernels, so a prompt of up to ~48 tokens took
 ~21 ms regardless of length (launch-bound). Chunks of up to 32 tokens now replay a captured graph (one per size,
@@ -178,7 +182,7 @@ GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`)
 
 | | accuracy |
 |---|---:|
-| engine bf16 | 0.835 (0.840 after prefill/scheduler/vision changes; 0.860 after PDL and the drafter work) |
+| engine bf16 | 0.835 (0.840 after prefill/scheduler/vision changes; 0.860 after PDL and the drafter work; 0.825 after the last prefill kernel changes) |
 | engine `dense_fp8` | 0.825 (0.855 with FP8 prefill projections) |
 | engine bf16 + `fp4_prefill` | 0.850 |
 | SGLang Balanced (baseline) | 0.850 |

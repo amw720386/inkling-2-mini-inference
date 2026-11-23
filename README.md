@@ -99,13 +99,13 @@ Profiles (numbers from the RTX PRO 6000 proxy, batch 1):
 
 | goal | flags | decode (plain / DSpark) | 8k prefill* | fidelity |
 |---|---|---:|---:|---|
-| checkpoint math | (none) | 172 / 324 tok/s | 481 ms | bf16 dense layers, as transformers / SGLang |
-| speed | `--dense-fp8` | 214 / 353 tok/s | 451 ms | FP8 attention projections and LM head (GSM8K unchanged) |
-| long prompts on GeForce | `--dense-fp8 --fp4-prefill` | 208 / 365 tok/s | 357 ms | adds NVFP4 activations for prefill experts |
+| checkpoint math | (none) | 172 / 324 tok/s | 469 ms | bf16 dense layers, as transformers / SGLang |
+| speed | `--dense-fp8` | 214 / 353 tok/s | 439 ms | FP8 attention projections and LM head (GSM8K unchanged) |
+| long prompts on GeForce | `--dense-fp8 --fp4-prefill` | 208 / 365 tok/s | 343 ms | adds NVFP4 activations for prefill experts |
 | long context | `--kv-fp8 --max-ctx 262144 --slots 1` | | | FP8 cache for the full-attention layers |
 
 \* 8192 random tokens, 2048-token chunks, all four modes on one machine (`bench_prefill.py 8192 2048 sweep`;
-`--fp4-prefill` alone: 387 ms). Natural-text prompts route to fewer experts and run faster (23-28k tok/s).
+`--fp4-prefill` alone: 373 ms). Natural-text prompts route to fewer experts and run faster (23-28k tok/s).
 
 On a GeForce card (RTX 5090) the bf16 prefill GEMMs run at half the PRO card's rate, so `--dense-fp8` and
 `--fp4-prefill` should matter more for prefill there than these proxy numbers show.

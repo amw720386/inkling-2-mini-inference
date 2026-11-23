@@ -41,12 +41,48 @@ def _rms_inv(ss, n: tl.constexpr, eps):
 
 # ----------------------------------------------------------------------- depth attn
 @triton.jit
+def _depth_attn_row_loop(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA: tl.constexpr,
+                         q, hmask, H: tl.constexpr, BH: tl.constexpr, eps, xe_reg, EXTRA_REG: tl.constexpr):
+    h = tl.arange(0, BH)
+    m_i = float("-inf")
+    l_i = 0.0
+    acc = tl.zeros((BH,), tl.float32)
+    for s in range(ns):
+        x = tl.load(Src + s * src_stride_s + src_row + h, mask=hmask, other=0.0).to(tl.float32)
+        rinv = _rms_inv(tl.sum(x * x, 0), H, eps)
+        logit = tl.sum(x * q, 0) * rinv
+        m_new = tl.maximum(m_i, logit)
+        a = tl.exp(m_i - m_new)
+        p = tl.exp(logit - m_new)
+        l_i = l_i * a + p
+        acc = acc * a + (p * rinv) * x
+        m_i = m_new
+    if HAS_EXTRA:
+        if EXTRA_REG:
+            x = xe_reg
+        else:
+            x = tl.load(Extra + extra_row + h, mask=hmask, other=0.0).to(tl.float32)
+        rinv = _rms_inv(tl.sum(x * x, 0), H, eps)
+        logit = tl.sum(x * q, 0) * rinv
+        m_new = tl.maximum(m_i, logit)
+        a = tl.exp(m_i - m_new)
+        p = tl.exp(logit - m_new)
+        l_i = l_i * a + p
+        acc = acc * a + (p * rinv) * x
+    return acc / l_i
+
+
+@triton.jit
 def _depth_attn_row(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA: tl.constexpr,
                     q, hmask, H: tl.constexpr, BH: tl.constexpr, eps, NS: tl.constexpr = 8, xe_reg=None,
-                    EXTRA_REG: tl.constexpr = False):
+                    EXTRA_REG: tl.constexpr = False, TILE: tl.constexpr = False):
     """Softmax attention of one token row over its sources (at most NS, plus an optional extra row); returns fp32
-    [BH]. All sources load as one [NS, BH] tile, so their loads overlap and the reductions run together (a
-    per-source loop serialized a load and two block reductions per source)."""
+    [BH]. TILE (decode-sized steps): all sources load as one [NS, BH] tile, so their loads overlap and the
+    reductions run together. Otherwise (prefill, thousands of programs) an online softmax over the sources one at
+    a time: the tile's registers would cut occupancy (prefill depth attention 6.8 -> 16.5 ms with it)."""
+    if not TILE:
+        return _depth_attn_row_loop(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA, q, hmask, H, BH,
+                                    eps, xe_reg, EXTRA_REG)
     h = tl.arange(0, BH)
     sv = tl.arange(0, NS)
     sm = sv < ns
@@ -77,7 +113,7 @@ def _depth_attn_row(Src, src_stride_s, src_row, ns, Extra, extra_row, HAS_EXTRA:
 def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_t, Q, Wn,
                        Out, out_stride_q, out_stride_t, eps,
                        HAS_EXTRA: tl.constexpr, NORM: tl.constexpr, OUT_F32: tl.constexpr,
-                       H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+                       H: tl.constexpr, BH: tl.constexpr, TILE: tl.constexpr = False, PDL: tl.constexpr = PDL_ON):
     if PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
@@ -87,7 +123,7 @@ def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_
     hm = h < H
     q = tl.load(Q + qi * H + h, mask=hm, other=0.0)
     o = _depth_attn_row(Src, src_stride_s, t * src_stride_t, ns, Extra, t * extra_stride_t, HAS_EXTRA,
-                        q, hm, H, BH, eps)
+                        q, hm, H, BH, eps, TILE=TILE)
     if NORM:
         o = o * _rms_inv(tl.sum(o * o, 0), H, eps) * tl.load(Wn + qi * H + h, mask=hm, other=0.0).to(tl.float32)
     dst = Out + qi * out_stride_q + t * out_stride_t + h
@@ -100,7 +136,7 @@ def _depth_attn_kernel(Src, src_stride_s, src_stride_t, ns, Extra, extra_stride_
 @triton.jit
 def _depth_attn2_kernel(SrcA, a_stride_s, a_stride_t, nsa, QA, OutA, oa_stride_q, oa_stride_t, NQA: tl.constexpr,
                         SrcB, b_stride_s, b_stride_t, nsb, QB, OutB, ob_stride_q, ob_stride_t, eps,
-                        H: tl.constexpr, BH: tl.constexpr, PDL: tl.constexpr = PDL_ON):
+                        H: tl.constexpr, BH: tl.constexpr, TILE: tl.constexpr = False, PDL: tl.constexpr = PDL_ON):
     """Two unnormalized depth attentions in one launch: queries 0..NQA-1 over source set A, the rest over B
     (a loop visit's attention input and its messages). fp32 outputs."""
     if PDL:
@@ -112,12 +148,12 @@ def _depth_attn2_kernel(SrcA, a_stride_s, a_stride_t, nsa, QA, OutA, oa_stride_q
     hm = h < H
     if qi < NQA:
         q = tl.load(QA + qi * H + h, mask=hm, other=0.0)
-        o = _depth_attn_row(SrcA, a_stride_s, t * a_stride_t, nsa, SrcA, 0, False, q, hm, H, BH, eps)
+        o = _depth_attn_row(SrcA, a_stride_s, t * a_stride_t, nsa, SrcA, 0, False, q, hm, H, BH, eps, TILE=TILE)
         tl.store(OutA + qi * oa_stride_q + t * oa_stride_t + h, o, mask=hm)
     else:
         qb = qi - NQA
         q = tl.load(QB + qb * H + h, mask=hm, other=0.0)
-        o = _depth_attn_row(SrcB, b_stride_s, t * b_stride_t, nsb, SrcB, 0, False, q, hm, H, BH, eps)
+        o = _depth_attn_row(SrcB, b_stride_s, t * b_stride_t, nsb, SrcB, 0, False, q, hm, H, BH, eps, TILE=TILE)
         tl.store(OutB + qb * ob_stride_q + t * ob_stride_t + h, o, mask=hm)
 
 
@@ -127,7 +163,7 @@ def depth_attn2(src_a, ns_a: int, q_a, out_a, src_b, ns_b: int, q_b, out_b, eps=
     _depth_attn2_kernel[(t, nqa + nqb)](
         src_a, src_a.stride(0), src_a.stride(1), ns_a, q_a, out_a, out_a.stride(0), out_a.stride(1), nqa,
         src_b, src_b.stride(0), src_b.stride(1), ns_b, q_b, out_b, out_b.stride(0), out_b.stride(1), eps,
-        H=h, BH=triton.next_power_of_2(h), num_warps=8,
+        H=h, BH=triton.next_power_of_2(h), TILE=t <= 32, num_warps=8,
     )
 
 
@@ -141,7 +177,7 @@ def depth_attn(src, ns: int, queries, out, *, extra=None, norm_w=None, out_f32=F
         extra.stride(0) if extra is not None else 0, queries, norm_w if norm_w is not None else queries,
         out, out.stride(0), out.stride(1), eps,
         HAS_EXTRA=extra is not None, NORM=norm_w is not None, OUT_F32=out_f32, H=h,
-        BH=triton.next_power_of_2(h), num_warps=8,
+        BH=triton.next_power_of_2(h), TILE=t <= 32, num_warps=8,
     )
     return out
 
@@ -329,6 +365,7 @@ def _post_attn_kernel(
     BOUNDARY: tl.constexpr, NORM: tl.constexpr, DECODE_STATE: tl.constexpr,
     H: tl.constexpr, BH: tl.constexpr, K: tl.constexpr,
     Cand=None, cand_sb=0, cand_sc=0, cand_sr=0, CAND: tl.constexpr = False,
+    TILE: tl.constexpr = False,
     PDL: tl.constexpr = PDL_ON,
 ):
     if PDL:
@@ -357,7 +394,7 @@ def _post_attn_kernel(
     tl.store(Resid + t * H + h, resid, mask=hm)
     q = tl.load(Q + h, mask=hm, other=0.0)
     o = _depth_attn_row(Src, src_stride_s, t * src_stride_t, ns, Resid, t * H, True, q, hm, H, BH, eps,
-                        xe_reg=tl.where(hm, resid, 0.0), EXTRA_REG=True)
+                        xe_reg=tl.where(hm, resid, 0.0), EXTRA_REG=True, TILE=TILE)
     if NORM:
         o = o * _rms_inv(tl.sum(o * o, 0), H, eps) * tl.load(Wn + h, mask=hm, other=0.0).to(tl.float32)
         tl.store(Out + t * out_stride_t + h, o.to(tl.bfloat16), mask=hm)
@@ -376,7 +413,7 @@ def post_attn(o, conv_w, state, blk, ns, part_slot, resid, query, norm_w, out, m
         BH=triton.next_power_of_2(h), K=cfg.sconv_kernel,
         Cand=cand if cand is not None else o, cand_sb=cand.stride(0) if cand is not None else 0,
         cand_sc=cand.stride(1) if cand is not None else 0, cand_sr=cand.stride(2) if cand is not None else 0,
-        CAND=cand is not None, num_warps=8,
+        CAND=cand is not None, TILE=t <= 32, num_warps=8,
     )
 
 
