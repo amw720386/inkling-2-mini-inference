@@ -1,5 +1,10 @@
 # How the engine works
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="media/request-path-light.svg">
+  <img src="media/request-path-dark.svg" alt="Request path: HTTP server, scheduler, prefill and decode, Triton kernels and static caches">
+</picture>
+
 Inkling-2-Mini is a looped MoE: 26.4B parameters in total, 3.4B active per token, hidden size 2304. Its 24 stored
 layers form a prelude (0-5), a loop core (6-17) that runs three passes, and a coda (18-23), so every token makes
 48 layer visits:
@@ -37,6 +42,16 @@ inkling_engine/
 
 ## Decode step
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="media/decode-step-light.svg">
+  <img src="media/decode-step-dark.svg" alt="One decode step: prelude, three loop passes, coda, LM head, sampler, DSpark draft and verify">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="media/kernel-fusion-light.svg">
+  <img src="media/kernel-fusion-dark.svg" alt="The fused launches of one layer visit">
+</picture>
+
 Every layer visit for a decode step (1 to 32 tokens) runs about 12 fused kernels:
 
 1. **Depth attention:** forms the attention input from the block residuals and, on loop passes 2 and 3, the gated
@@ -65,6 +80,8 @@ wait, because none of that depends on the previous kernel.
 
 ## Speculative decoding (DSpark)
 
+<img src="media/dspark.gif" width="800" alt="DSpark: seven drafts, one verify step; the longest correct prefix is kept">
+
 - **Drafting:**
   - The drafter has 3 bidirectional block layers and a Markov RNN head.
   - From the target's hidden states at visits 5, 23, 41 and 48, it drafts the next 7 tokens in one pass.
@@ -88,6 +105,11 @@ wait, because none of that depends on the previous kernel.
 - **`--dense-fp8`:** runs the projections as FP8 GEMMs.
 
 ## Caches and memory
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="media/memory-layout-light.svg">
+  <img src="media/memory-layout-dark.svg" alt="The 32 GiB budget: four 32k slots, or one 256k FP8 slot">
+</picture>
 
 - **Cache layout:** full-attention layers keep a contiguous per-slot KV cache, in bf16 or E4M3 (`--kv-fp8`).
   Sliding layers keep a ring of window + 64 positions, so rejected draft rows never overwrite live keys.
