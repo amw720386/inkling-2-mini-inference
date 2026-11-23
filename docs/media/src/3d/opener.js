@@ -10,10 +10,11 @@ import { setup, rng, textLabel, glowTexture, fitCamera, lerp, COLORS } from './c
 await document.fonts.load('400 64px JBMono');
 // ?gif=1: the README loop (fixed wide camera, one caption, everything fades back to idle so the loop is seamless)
 const GIF = new URLSearchParams(location.search).get('gif') === '1';
-// ?tex=data: tile texture from the real checkpoint (expert-atlas.png, built by build_expert_atlas.py: each tile shows
-// that expert's w13 block scales in that layer); otherwise a procedural texture. Nothing else changes.
-const DATA_TEX = new URLSearchParams(location.search).get('tex') === 'data';
-const atlas = DATA_TEX ? await new THREE.TextureLoader().loadAsync('expert-atlas.png') : null;
+// Tile texture: by default real checkpoint data (expert-atlas.png, built by build_expert_atlas.py: per expert and layer,
+// brightness = w13 amax, grain = w13 block scales). ?tex=procedural (or a missing atlas) uses a procedural texture
+// instead. Nothing else changes between the two.
+const DATA_TEX = new URLSearchParams(location.search).get('tex') !== 'procedural';
+const atlas = DATA_TEX ? await new THREE.TextureLoader().loadAsync('expert-atlas.png').catch(() => null) : null;
 if (atlas) { atlas.magFilter = THREE.NearestFilter; atlas.minFilter = THREE.LinearMipmapLinearFilter; atlas.colorSpace = THREE.NoColorSpace }
 const DURATION = GIF ? 6.6 : 6.0;
 const { W, H, ramp } = window.S;
