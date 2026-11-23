@@ -100,24 +100,27 @@
   const ACCEPT = 4;
 
   const els = ['#kicker', '#head', '#b1', '#b2', '#b3', '#legend', '#caveat'].map(S.$);
-  const starts = [0.45, 0.6, 1.05, 1.85, 2.65, 3.45, 3.7];
+  // The kicker and headline are on screen from the first frame, so the cross-fade from the race lands on them;
+  // the boxes build after the 0.4 s cross-fade window (B shifts every build time).
+  const B = -0.55;
+  const starts = [-1, -1, 1.05 + B, 1.85 + B, 2.65 + B, 3.45 + B, 3.7 + B];
   window.SCENE = { duration: 6.0 };
   window.renderFrame = t => {
     els.forEach((e, i) => S.fadeUp(e, t, starts[i], null, 0.45));
     // drafts pop in one by one
-    drafts.forEach((r, i) => { const k = S.ramp(t, 1.35 + i * 0.07, 0.3); r.setAttribute('fill', C.orange); r.setAttribute('opacity', (0.15 + 0.85 * k).toFixed(3)) });
+    drafts.forEach((r, i) => { const k = S.ramp(t, 1.35 + B + i * 0.07, 0.3); r.setAttribute('fill', C.orange); r.setAttribute('opacity', (0.15 + 0.85 * k).toFixed(3)) });
     // experts: dim grid, 8 lit per visit once the box is in
-    const visit = Math.max(0, Math.floor((t - 2.1) / 0.3));
-    const lit = pick(Math.min(visit, 9));                          // settles on one pick after 3 s so the end holds still
-    ex.forEach((r, i) => { const on = t > 2.1 && lit.has(i); r.setAttribute('fill', on ? C.blue : C.grey); r.setAttribute('opacity', on ? 1 : 0.2) });
+    const visit = Math.max(0, Math.floor((t - 2.1 - B) / 0.3));
+    const lit = pick(Math.min(visit, 9));                          // settles on one pick so the last 1.7 s hold still
+    ex.forEach((r, i) => { const on = t > 2.1 + B && lit.has(i); r.setAttribute('fill', on ? C.blue : C.grey); r.setAttribute('opacity', on ? 1 : 0.2) });
     // verify: tiles start as drafts (orange), then resolve left to right
     ver.forEach((r, i) => {
-      const k = S.ramp(t, 3.0 + i * 0.1, 0.25);
+      const k = S.ramp(t, 3.0 + B + i * 0.1, 0.25);
       let fill = C.orange, op = 0.85;
       if (k > 0.5) { if (i < ACCEPT) fill = C.green; else if (i === ACCEPT) fill = C.red; else { fill = C.grey; op = 0.25 } }
       r.setAttribute('fill', fill); r.setAttribute('opacity', op);
     });
-    arrows.forEach((a, i) => { const k = S.ramp(t, 1.55 + i * 0.8, 0.35); a.line.setAttribute('opacity', k); a.head.setAttribute('opacity', k) });
+    arrows.forEach((a, i) => { const k = S.ramp(t, 1.55 + B + i * 0.8, 0.35); a.line.setAttribute('opacity', k); a.head.setAttribute('opacity', k) });
   };
 </script>
 </body></html>
