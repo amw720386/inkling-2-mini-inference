@@ -20,8 +20,8 @@ eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4)
 sched = Scheduler(eng)
 items = json.load(open("/root/tests/reference/sglang_ref.json"))["items"]
 prompts = [it["input_ids"] for it in items[:4]]
-eng._pick_width = lambda conf, gamma=None: m
-eng._pick_width_batched = lambda confs, g: m
+eng._pick_width = lambda conf, gamma=None, seeded=False: m
+eng._pick_width_batched = lambda reqs: m
 sched._spec_pays = lambda reqs: True
 
 alone = []

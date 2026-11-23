@@ -303,7 +303,9 @@ class Drafter:
         self.m_h = z(BLOCK * n, D, dt=torch.bfloat16)
         self.m_o = z(BLOCK * n, HEADS * HEAD_DIM, dt=torch.bfloat16)
         self.m_base = z(GAMMA * n, self.short_ids.numel(), dt=torch.bfloat16)
-        self.m_heads = [MarkovHead(GAMMA, RANK, CANDIDATES, device) for _ in range(n)]
+        self.m_rest = z(n, GAMMA, 3 * RANK)
+        self.m_cbase = z(n, GAMMA, CANDIDATES)
+        self.m_heads = MarkovHead(GAMMA, RANK, CANDIDATES, device, slots=n)  # all slots in one launch per step
         self.multi_graphs: dict = {}
 
     @torch.inference_mode()
@@ -332,16 +334,16 @@ class Drafter:
             res, xn = add_rms(res, m, nxt, EPS)
         h = xn.reshape(k, BLOCK, -1)[:, 1:].reshape(GAMMA * k, -1).contiguous()
         base = dense_mm(h, self.head8, self.m_base[:GAMMA * k]).float()
-        for i, s_ in enumerate(slots):
-            r = slice(GAMMA * i, GAMMA * (i + 1))
-            cand_base, ci = base[r].topk(CANDIDATES, dim=-1, sorted=False)
-            cand = self.short_ids[ci]
-            f = self.ctxs[s_]["f"]
-            rest = (torch.cat([h[r], f[None].expand(GAMMA, -1)], dim=1) @ self.rnn_w_rest).float()
-            self.m_cand[i].copy_(cand)
-            self.m_heads[i].run(rest.contiguous(), cand_base.contiguous(), self.m_cand[i], self.rnn_w_step,
-                                self.rnn_b, self.w1, self.m_anchor[i:i + 1], self.fold_w, self.fold_b, self.m_tok[i],
-                                self.m_conf[i], self.m_temp[i:i + 1], self.seed)
+        # every slot's candidates and step projections in single launches, then the Markov heads together
+        cand_base, ci = base.view(k, GAMMA, -1).topk(CANDIDATES, dim=-1, sorted=False)
+        self.m_cbase[:k].copy_(cand_base)
+        self.m_cand[:k].copy_(self.short_ids[ci])
+        f = torch.stack([self.ctxs[s_]["f"] for s_ in slots])  # [k, D]
+        hf = torch.cat([h.view(k, GAMMA, -1), f[:, None].expand(k, GAMMA, -1)], dim=2)
+        self.m_rest[:k].copy_((hf.reshape(k * GAMMA, -1) @ self.rnn_w_rest).view(k, GAMMA, -1))
+        self.m_heads.run(self.m_rest, self.m_cbase, self.m_cand, self.rnn_w_step, self.rnn_b, self.w1,
+                         self.m_anchor, self.fold_w, self.fold_b, self.m_tok, self.m_conf, self.m_temp, self.seed,
+                         n=k)
         self.seed.add_(1)
 
     def draft_multi(self, anchors: list[int], Ps: list[int], temps: list[float], slots: list[int]):
@@ -373,7 +375,7 @@ class Drafter:
         else:
             self.bucket = bucket
             self._draft_multi(key[0])
-        return [(self.m_tok[i], self.m_conf[i], self.m_cand[i], self.m_heads[i].logits) for i in range(k)]
+        return [(self.m_tok[i], self.m_conf[i], self.m_cand[i], self.m_heads.logits[i]) for i in range(k)]
 
     def capture(self, pool=None):
         """Draft graphs per (context bucket, slot) and commit graphs per (rows, slot); one memory pool."""

@@ -216,11 +216,9 @@ class Engine:
         self.gamma = 2.0
         self.draft_cost, self.verify_costs, self.decode_costs, self.draft_multi_costs = 1.0, {}, {}, {}
         self.timer = GpuTimer()
-        self.batch_tokens: dict = {}  # (k, m) -> EMA of tokens committed per batched round (all k sequences)
-        self.batch_wall: dict = {}  # (k, m) -> EMA of a batched round's wall time (ms), host work included
-        self.plain_wall: dict = {}  # k -> EMA of a batched plain step's wall time (ms), set by the scheduler
         self.batch_rounds: dict = {}  # k -> batched rounds so far
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
+        self.seeded_costs = dict(self.costs)  # fixed at calibration: a seeded request's widths never depend on traffic
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
         self.slot_ids: list[list[int]] = [[] for _ in range(slots)]  # tokens whose positions each slot holds
         self.snaps: list = [None] * slots  # per slot: state at the end of its last prompt (see _snapshot)
@@ -293,25 +291,6 @@ class Engine:
         if self.verify_costs:
             self.timer.harvest(self._observe_cost)
 
-    def _batched_rate(self, k: int, m: int) -> float | None:
-        """Measured tokens per wall ms of batched rounds of k sequences at width m (None before a sample). Wall
-        time, not GPU time: each round's host work and syncs cost narrow widths more (they need more rounds)."""
-        tok = self.batch_tokens.get((k, m))
-        return None if tok is None else tok / self.batch_wall[(k, m)]
-
-    def batched_spec_rate(self, accept_estimates: list[float]) -> tuple[float, float]:
-        """(expected tokens/ms of a batched DSpark round, tokens/ms of a batched plain step) for requests
-        with these expected accepted drafts per round: measured rates once every width has run at this k."""
-        k = len(accept_estimates)
-        rate = self._batched_rate(k, self.BATCH_WIDTH.get(k, 4))
-        if rate is not None:
-            return rate, k / self.plain_wall.get(k, self.decode_costs[k])
-        best = 0.0
-        for m in VERIFY_WIDTHS:
-            tokens = sum(1.0 + min(a, m - 1) for a in accept_estimates)
-            best = max(best, tokens / (self.draft_multi_costs[k] + self.verify_costs[(k, m)]))
-        return best, k / self.decode_costs[k]
-
     def _expected(self, conf: list[float], m: int, gamma: float | None = None) -> float:
         """Expected accepted drafts of a width-m verify: leading products of conf ** gamma."""
         g = self.gamma if gamma is None else gamma
@@ -321,24 +300,29 @@ class Engine:
             exp += run
         return exp
 
-    def _pick_width(self, conf: list[float], gamma: float | None = None) -> int:
+    def _pick_width(self, conf: list[float], gamma: float | None = None, seeded: bool = False) -> int:
         """Width maximizing expected committed tokens per ms. The drafter's confidences overstate
-        acceptance; gamma (confidence ** gamma) is tuned online by `_observe`."""
+        acceptance; gamma (confidence ** gamma) is tuned online by `_observe`. Seeded requests use the fixed
+        calibration costs (reproducible); the others the online measured ones."""
+        costs = self.seeded_costs if seeded else self.costs
         best, best_rate = VERIFY_WIDTHS[0], -1.0
         for m in VERIFY_WIDTHS:
-            rate = (1.0 + self._expected(conf, m, gamma)) / self.costs[m]
+            rate = (1.0 + self._expected(conf, m, gamma)) / costs[m]
             if rate > best_rate:
                 best, best_rate = m, rate
         return best
 
-    # common verify width of a batched round by batch size (bench/experiments/sched_widths.py, greedy): at 4
-    # requests width 4 525-533 tok/s vs 449 (2), 447-461 (8), 472 (3), 474 (6), 511-519 for the per-round
-    # confidence pick, 451-528 for a measured-rate bandit (it locked onto early lucky samples); 3 requests: 4;
-    # 2 requests: 8 (472 vs 447 for 4)
-    BATCH_WIDTH = {2: 8, 3: 4, 4: 4}
+    # common verify width of a batched round (bench/experiments/sched_widths.py, greedy, 4 requests): width 4
+    # 532-535 tok/s vs 449 (2), 447-461 (8), 472 (3), 474 (6), 511-519 for the per-round confidence pick, 451-528
+    # for a measured-rate bandit, 477-514 for ragged per-request widths. Width 8 pays only for a pair of requests
+    # that both accept well (2 requests, rep 0: 472 vs 447 for 4); in a 4-request run's tail it lost (517-526).
+    BATCH_WIDTH = 4
+    WIDE_PAIR_ACCEPT = 1.5  # mean recent accepted drafts per round of a 2-request batch for width 8
 
-    def _pick_width_batched(self, confs: list, gammas: list) -> int:
-        return self.BATCH_WIDTH.get(len(confs), 4)
+    def _pick_width_batched(self, reqs) -> int:
+        if len(reqs) == 2 and sum(getattr(r, "accept_ema", 0.0) for r in reqs) / 2 >= self.WIDE_PAIR_ACCEPT:
+            return 8
+        return self.BATCH_WIDTH
 
     def _observe(self, conf: list[float], m: int, accepted: int):
         err = accepted - self._expected(conf, m)
@@ -515,7 +499,7 @@ class Engine:
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
         seeded = sp.seed is not None
-        m = self._pick_width(confs, SEEDED_GAMMA if seeded else None)
+        m = self._pick_width(confs, SEEDED_GAMMA if seeded else None, seeded)
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
@@ -546,7 +530,6 @@ class Engine:
         anchor), .sp, .gen, .stats. Returns per request (new tokens, rows committed)."""
         d = self.drafter
         drafts = []
-        t_round = time.perf_counter()
         self.harvest_costs()
         k = len(reqs)
         ev = self.timer.start(("draft", k)) if self.verify_costs else None
@@ -557,18 +540,17 @@ class Engine:
             q = torch.softmax(lg_c / self._draft_temp(r.sp), -1) if r.sp.temperature > 0 else None
             drafts.append((tok, conf, cand if q is not None else None, q))
         m_tok = d.m_tok[:k]  # [k, 7] drafts of batch positions 0..k-1 (the views returned above)
+        # the width depends only on k, so the verify is queued right behind the draft: no host round trip between
+        # them; drafts, confidences and the greedy acceptance come back in one sync after the verify
+        m = self._pick_width_batched(reqs)
         anchors = torch.tensor([r.out[-1] for r in reqs], dtype=torch.int64).to("cuda", non_blocking=True)
-        info = torch.cat([d.m_conf[:k], m_tok.float()], 1).tolist()  # one sync
-        confs = [row[:7] for row in info]
-        drafted = [[int(x) for x in row[7:]] for row in info]
-        m = self._pick_width_batched(confs, [SEEDED_GAMMA if r.sp.seed is not None else None for r in reqs])
         vt = torch.cat([anchors[:, None], m_tok[:, :m - 1]], 1).reshape(-1)
         ev = self.timer.start(("verify", k, m))
         logits, taps = self.verify[(k, m)].run(vt, [r.slot for r in reqs], [r.P for r in reqs])
         self.timer.stop(("verify", k, m), ev)
         lg = logits.view(k, m, -1)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
-        res = {}
+        parts = [torch.cat([d.m_conf[:k], m_tok.float()], 1).reshape(-1)]  # ids < 2^24: exact in fp32
         if greedy:
             if len(greedy) == k:  # no index tensor (a blocking host-to-device copy)
                 target, dr = lg.argmax(-1), m_tok[:, :m - 1]
@@ -577,29 +559,27 @@ class Engine:
                 target = lg[gi].argmax(-1)  # [g, m]
                 dr = m_tok[gi, :m - 1]
             acc = (dr == target[:, :m - 1]).int().cumprod(1).sum(1)
-            flat = torch.cat([acc[:, None], target.int()], 1).tolist()  # one sync
-            for j, i in enumerate(greedy):
-                a = flat[j][0]
-                res[i] = (a, flat[j][1 + a])
+            parts.append(torch.cat([acc[:, None], target], 1).float().reshape(-1))
+        vals = torch.cat(parts).tolist()  # the round's one sync
+        confs = [vals[i * 14:i * 14 + 7] for i in range(k)]
+        drafted = [[int(x) for x in vals[i * 14 + 7:i * 14 + 14]] for i in range(k)]
+        res = {}
+        base = 14 * k
+        for j, i in enumerate(greedy):
+            row = vals[base + j * (m + 1):base + (j + 1) * (m + 1)]
+            a = int(row[0])
+            res[i] = (a, int(row[1 + a]))
         for i, r in enumerate(reqs):
             if i not in res:
                 _, _, cand, q = drafts[i]
                 res[i] = accept_sampled(drafts[i][0][:m - 1], lg[i], cand[:m - 1], q[:m - 1], r.sp, r.gen)
         out = []
-        total = sum(res[i][0] + 1 for i in range(k))
-        wall = (time.perf_counter() - t_round) * 1e3
-        old = self.batch_tokens.get((k, m))
-        if old is None:
-            self.batch_tokens[(k, m)], self.batch_wall[(k, m)] = total, wall
-        else:
-            self.batch_tokens[(k, m)] = 0.8 * old + 0.2 * total
-            self.batch_wall[(k, m)] = 0.8 * self.batch_wall[(k, m)] + 0.2 * wall
+        self.cache.commit_spec_multi([r.slot for r in reqs], [res[i][0] + 1 for i in range(k)])
         for i, r in enumerate(reqs):
             a, nxt = res[i]
             commit = a + 1
             if r.sp.seed is None:
                 self._observe(confs[i], m, a)
-            self.cache.commit_spec(r.slot, commit, i)
             d.commit(taps[i * m:i * m + commit], r.P, slot=r.slot)
             r.stats.rounds += 1
             r.stats.accepted += a

@@ -49,6 +49,21 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
 - Batched acceptance equals solo acceptance (batched_accept.py); the 4-request average is pulled down by the
   tail once the fastest requests finish.
 
+- Batched rounds (second pass): one host sync per round (width depends only on the batch, so the verify is
+  queued right behind the draft), the multi-slot Markov head in one launch per step for all slots (4-slot
+  draft 1.46 -> 1.08 ms), conv-state commits for all requests in one gather/scatter per state tensor, width 4
+  (width 8 only for a pair with mean recent acceptance >= 1.5: in a 4-request run's tail width 8 lost), always
+  speculate unless every request's recent acceptance is < 0.5 (a measured-rate switch to plain lost 3%), every
+  prefilling prompt advances one chunk per loop (arrivals start together). sched_idle: GPU idle 8.5% -> 4.0%.
+  In process 4 requests 535-548 tok/s; bench_concurrency 432 -> 460 (4), 383 -> 406 (2).
+- Seeded requests pick widths from the calibration costs (fixed), not the online ones (reproducible).
+- Small-M grouped MoE is bandwidth-bound: 1.38-1.42 TB/s cold at T >= 8 (92% of the read ceiling), hot no faster
+  (grouped_hot_cold.py).
+- Dropped: ragged per-request widths inside a common verify graph (MoE rows masked via the router): 477-514
+  (confidences) / 416-428 (acceptance EMA) vs 508-518 fixed width 4; server token coalescing / batched stream
+  decode (510 vs 522, noise); a 0.2-0.5 ms GIL switch interval (no consistent change).
+- Server vs in-process, client in its own process (serve_gap.py): 2-4%.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.

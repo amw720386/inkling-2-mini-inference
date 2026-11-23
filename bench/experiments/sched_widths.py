@@ -1,5 +1,6 @@
-"""4 concurrent greedy 256-token requests (no stop tokens) through the scheduler: the width policy vs forced
-common verify widths, and batched speculation vs plain batched steps (Modal: parity --args "sched_widths.py [k]").
+"""k concurrent greedy 256-token requests (no stop tokens) through the scheduler: the default batched verify widths
+vs forced widths, and batched speculation vs plain batched steps
+(Modal: parity --args "sched_widths.py [k] [default,m=2,m=4,m=8,plain]").
 """
 
 import json
@@ -21,7 +22,7 @@ eng = Engine(sys.argv[1], max_ctx=32768, spec=True, slots=4)
 sched = Scheduler(eng)
 items = json.load(open("/root/tests/reference/sglang_ref.json"))["items"]
 prompts = [it["input_ids"] for it in items[:6]]
-policy = eng._pick_width_batched
+default_pick = eng._pick_width_batched
 
 
 def run(rep):
@@ -36,17 +37,13 @@ def run(rep):
 
 
 run(0)
-for name in ["m=2", "m=4", "m=8"]:
+names = sys.argv[3].split(",") if len(sys.argv) > 3 else ["default", "m=2", "m=4", "m=8", "plain"]
+for name in names:
     sched.batched_spec = name != "plain"
-    eng._pick_width_batched = (lambda confs, g, m=int(name[2:]): m) if name.startswith("m=") else policy
-    pays = Scheduler._spec_pays
-    if name != "policy":
-        sched._spec_pays = lambda reqs: True
-    else:
-        sched._spec_pays = lambda reqs, s=sched: pays(s, reqs)
+    eng._pick_width_batched = (lambda reqs, m=int(name[2:]): m) if name.startswith("m=") else default_pick
     rates = [run(rep) for rep in range(2)]
-    print(f"k={k} {name:12s}: {' / '.join(f'{r:.0f}' for r in rates)} tok/s | batched_spec rounds "
-          f"{sched.counters['batched_spec'][0]} batched {sched.counters['batched'][0]}")
+    print(f"k={k} {name:8s}: {' / '.join(f'{r:.0f}' for r in rates)} tok/s | batched_spec rounds "
+          f"{sched.counters['batched_spec'][0]} batched {sched.counters['batched'][0]}", flush=True)
     sched.counters = {kk: ([0, 0.0] if kk != "batch_sizes" else {}) for kk in sched.counters}
 print("online costs", {kk: round(v, 2) for kk, v in eng.verify_costs.items() if kk[0] == k},
       "decode", {kk: round(v, 2) for kk, v in eng.decode_costs.items()})

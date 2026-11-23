@@ -62,6 +62,14 @@ class InklingCache:
         for name, cand in self.cand.items():
             getattr(self, name)[:, slot].copy_(cand[:, b, n_commit - 1])
 
+    def commit_spec_multi(self, slots: list[int], n_commits: list[int]):
+        """commit_spec for batch positions 0..k-1 at once: one gather and one scatter per state tensor."""
+        idx = torch.tensor([slots, [n - 1 for n in n_commits]], dtype=torch.int64).to(
+            self.k_conv.device, non_blocking=True)
+        b = torch.arange(len(slots), device=self.k_conv.device)
+        for name, cand in self.cand.items():
+            getattr(self, name)[:, idx[0]] = cand[:, b, idx[1]]
+
     def reset_slot(self, slot: int) -> None:
         for t in (self.k_conv, self.v_conv, self.attn_conv, self.mlp_conv):
             t[:, slot].zero_()
