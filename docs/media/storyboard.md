@@ -46,7 +46,7 @@ Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before re
 - Done: the memory scene, `memory.gif` and the `memory-layout` diagrams use the FP8 default (25.9 / 27.4 GiB and
   24.9 / 27.1 GiB, `tests/gpu/memcheck.py`; FP8 weight sizes computed in `src/3d/memory.js` and `src/diagrams/diagrams.js`).
   The launch mp4s get the new scene 4 with the video re-render above.
-- Drop or redraw `scheduler.gif`: its idle-GPU claim is wrong (a trace shows the GPU busy 91-94% of the time).
+- Done: `scheduler.gif` dropped (its idle-GPU claim was wrong: a trace shows the GPU busy 91-94% of the time).
 - `render_modal.py` is meant to run `render.sh` on a Modal container. It has not been run yet.
 
 Model facts (`docs/architecture.md`): 26.4B parameters, 3.4B active per token; 24 stored layers = prelude 6

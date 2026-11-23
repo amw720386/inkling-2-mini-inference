@@ -72,7 +72,6 @@ scenes/gif-race.html 960x540 15 race none
 3d/opener.html?gif=1 1280x720 15 loop bayer:bayer_scale=4
 3d/memory.html?gif=1 1280x720 15 memory bayer:bayer_scale=4
 gifs/dspark.html 960x540 20 dspark none
-gifs/scheduler.html 960x540 20 scheduler none
 GIFS
 fi
 
