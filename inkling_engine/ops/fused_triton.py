@@ -419,6 +419,24 @@ def post_attn(o, conv_w, state, blk, ns, part_slot, resid, query, norm_w, out, m
 
 # --------------------------------------------------------------------------- router
 @triton.jit
+def _select_topk(lg, LRow, bias, ea, E: tl.constexpr, TOPK: tl.constexpr):
+    """Top-k of sigmoid(lg) + bias (ties -> lowest expert), weights sigmoid(lg) of the picks. Each pick is one
+    max over int64 keys (order-preserving score bits << 32 | E-1-expert) instead of max + argmin + gather, so a
+    multi-warp program pays one cross-warp reduction per pick; the picks' weights are re-read from LRow."""
+    sel = tl.sigmoid(lg) + bias
+    b = sel.to(tl.int32, bitcast=True)
+    key = ((b ^ ((b >> 31) & 0x7FFFFFFF)).to(tl.int64) << 32) | (E - 1 - ea).to(tl.int64)
+    ks = tl.arange(0, TOPK)
+    ids = tl.zeros((TOPK,), tl.int32)
+    for j in tl.static_range(TOPK):
+        mk = tl.max(key, 0)
+        ids = tl.where(ks == j, (E - 1 - (mk & 0xFFFFFFFF)).to(tl.int32), ids)
+        key = tl.where(key == mk, -9223372036854775807 - 1, key)
+    ws = tl.sigmoid(tl.load(LRow + ids, volatile=True))
+    return ids, ws
+
+
+@triton.jit
 def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
                         H: tl.constexpr, BH: tl.constexpr, E: tl.constexpr, BE: tl.constexpr, TOPK: tl.constexpr, PDL: tl.constexpr = PDL_ON):
     """Each program computes BE expert logits of one token with one load of its weight rows; the program
@@ -442,18 +460,8 @@ def _router_topk_kernel(X, x_stride, W, Bias, Logits, Counter, Ids, Wts, scale,
     if done == NPROG - 1:
         ea = tl.arange(0, E)
         lg = tl.load(Logits + t * E + ea, volatile=True)
-        sg = tl.sigmoid(lg)
-        sel = sg + tl.load(Bias + ea)
+        ids, ws = _select_topk(lg, Logits + t * E, tl.load(Bias + ea), ea, E, TOPK)
         ks = tl.arange(0, TOPK)
-        ids = tl.zeros((TOPK,), tl.int32)
-        ws = tl.zeros((TOPK,), tl.float32)
-        for j in tl.static_range(TOPK):
-            mx = tl.max(sel, 0)
-            idx = tl.min(tl.where(sel == mx, ea, E), 0)
-            wj = tl.sum(tl.where(ea == idx, sg, 0.0), 0)
-            ids = tl.where(ks == j, idx, ids)
-            ws = tl.where(ks == j, wj, ws)
-            sel = tl.where(ea == idx, float("-inf"), sel)
         ws = ws / (tl.sum(ws, 0) + 1e-20) * scale
         tl.store(Ids + t * TOPK + ks, ids)
         tl.store(Wts + t * TOPK + ks, ws)
@@ -470,18 +478,9 @@ def _topk_kernel(Logits, l_stride, Bias, Ids, Wts, E: tl.constexpr, TOPK: tl.con
         tl.extra.cuda.gdc_launch_dependents()
     t = tl.program_id(0).to(tl.int64)
     ea = tl.arange(0, E)
-    sg = tl.sigmoid(tl.load(Logits + t * l_stride + ea))
-    sel = sg + tl.load(Bias + ea)
+    lg = tl.load(Logits + t * l_stride + ea)
+    ids, ws = _select_topk(lg, Logits + t * l_stride, tl.load(Bias + ea), ea, E, TOPK)
     ks = tl.arange(0, TOPK)
-    ids = tl.zeros((TOPK,), tl.int32)
-    ws = tl.zeros((TOPK,), tl.float32)
-    for j in tl.static_range(TOPK):
-        mx = tl.max(sel, 0)
-        idx = tl.min(tl.where(sel == mx, ea, E), 0)
-        wj = tl.sum(tl.where(ea == idx, sg, 0.0), 0)
-        ids = tl.where(ks == j, idx, ids)
-        ws = tl.where(ks == j, wj, ws)
-        sel = tl.where(ea == idx, float("-inf"), sel)
     ws = ws / (tl.sum(ws, 0) + 1e-20) * scale
     tl.store(Ids + t * TOPK + ks, ids)
     tl.store(Wts + t * TOPK + ks, ws)
