@@ -3,13 +3,14 @@
     python bench/serve_bench.py --base http://127.0.0.1:8000/v1 --model <name> --prompts tests/reference/sglang_ref.json
 
 Everything goes through /v1/completions with token-id prompts, so tokenization and chat templates cannot differ:
-  decode       6 reference prompts, 256 tokens, ignore_eos, greedy and temperature 1 (seeded); decode tok/s =
-               (tokens - 1) / (last token - first token), measured client-side over the stream
+  decode       6 reference prompts, 256 tokens, ignore_eos, greedy and temperature 1 (seeded), one request at a time;
+               tok/s = completion tokens / (request sent -> stream finished), median of --decode-reps passes
   ttft         random-token prompts of 1k / 8k / 30k tokens, max_tokens 1, a fresh prompt per run (no prefix cache)
-  concurrency  k = 1, 2, 4 simultaneous 256-token requests, aggregate output tok/s
+  concurrency  k = 1, 2, 4 simultaneous 256-token requests, aggregate output tok/s, median of 6 prompt rotations
   gsm8k        200 test questions, 5-shot "Question: / Answer:" prompts from the train split, greedy, stop at
                "Question", last number vs the label (the protocol of SGLang's few_shot_gsm8k)
-Prints and writes one JSON object.
+Rates never use the arrival times of text: a server may send nothing for a special token, so the first or last
+visible chunk can be many tokens away from the first or last generated one. Prints and writes one JSON object.
 """
 
 from __future__ import annotations
@@ -34,40 +35,38 @@ def stream(base, model, prompt, max_tokens, temperature=0.0, seed=None, stop=Non
     if stop:
         body["stop"] = stop
     t0 = time.perf_counter()
-    first = last = None
+    first = end = None
     n_chunks, usage, text = 0, None, []
     with requests.post(base + "/completions", json=body, stream=True, timeout=600) as r:
         r.raise_for_status()
-        for line in r.iter_lines():
+        for line in r.iter_lines(chunk_size=None):  # each piece as it arrives
             if not line.startswith(b"data: ") or line[6:] == b"[DONE]":
                 continue
+            end = time.perf_counter()
             ev = json.loads(line[6:])
             if ev.get("usage"):
                 usage = ev["usage"]
             for ch in ev.get("choices") or []:
                 if ch.get("text"):
-                    now = time.perf_counter()
-                    first = first or now
-                    last = now
+                    first = first or end
                     n_chunks += 1
                     text.append(ch["text"])
     n = (usage or {}).get("completion_tokens") or n_chunks
-    return {"ttft": (first or time.perf_counter()) - t0, "decode_s": (last or 0) - (first or 0), "tokens": n,
+    return {"ttft": (first or time.perf_counter()) - t0, "total_s": (end or time.perf_counter()) - t0, "tokens": n,
             "text": "".join(text)}
 
 
-def decode_rate(r):
-    return (r["tokens"] - 1) / r["decode_s"] if r["decode_s"] > 0 and r["tokens"] > 1 else 0.0
-
-
-def bench_decode(base, model, prompts, temperature):
-    out = []
-    for i, ids in enumerate(prompts):
-        r = stream(base, model, ids, 256, temperature, seed=100 + i if temperature > 0 else None)
-        out.append({"prompt_tokens": len(ids), "tokens": r["tokens"], "tok_s": round(decode_rate(r), 1)})
-    tot_t = sum(o["tokens"] - 1 for o in out)
-    tot_s = sum((o["tokens"] - 1) / o["tok_s"] for o in out if o["tok_s"] > 0)
-    return {"per_prompt": out, "overall_tok_s": round(tot_t / tot_s, 1)}
+def bench_decode(base, model, prompts, temperature, reps=3):
+    runs, per = [], [[] for _ in prompts]
+    for rep in range(reps):
+        toks = secs = 0.0
+        for i, ids in enumerate(prompts):
+            r = stream(base, model, ids, 256, temperature, seed=100 + i + 10 * rep if temperature > 0 else None)
+            per[i].append(round(r["tokens"] / r["total_s"], 1))
+            toks, secs = toks + r["tokens"], secs + r["total_s"]
+        runs.append(round(toks / secs, 1))
+    return {"per_prompt": [{"prompt_tokens": len(p), "tok_s": x} for p, x in zip(prompts, per)], "runs": runs,
+            "overall_tok_s": round(statistics.median(runs), 1)}
 
 
 def bench_ttft(base, model, lengths, reps=2):
@@ -83,11 +82,11 @@ def bench_ttft(base, model, lengths, reps=2):
     return res
 
 
-def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=2):
+def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=6):
     res = {}
     for k in ks:
-        best, rates = 0.0, []
-        for rep in range(reps):
+        runs = []
+        for rep in range(-1, reps):  # rep -1 warms up this batch size
             outs = [None] * k
             th = [threading.Thread(target=lambda i=i: outs.__setitem__(
                 i, stream(base, model, prompts[(i + rep) % len(prompts)], 256))) for i in range(k)]
@@ -95,10 +94,9 @@ def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=2):
             [x.start() for x in th]
             [x.join() for x in th]
             dt = time.perf_counter() - t0
-            rate = sum(o["tokens"] for o in outs) / dt
-            best = max(best, rate)
-            rates.append(round(rate, 1))
-        res[str(k)] = {"aggregate_tok_s": round(best, 1), "runs": rates}
+            if rep >= 0:
+                runs.append(round(sum(o["tokens"] for o in outs) / dt, 1))
+        res[str(k)] = {"aggregate_tok_s": round(statistics.median(runs), 1), "runs": runs}
     return res
 
 
@@ -129,8 +127,9 @@ def main():
     ap.add_argument("--prompts", default="tests/reference/sglang_ref.json")
     ap.add_argument("--ttft", default="1024,4096,8192,30000")
     ap.add_argument("--conc", default="1,2,4", help="concurrency levels")
+    ap.add_argument("--reps", type=int, default=6, help="concurrency repetitions per level (median reported)")
+    ap.add_argument("--decode-reps", type=int, default=3, help="passes over the decode prompts (median reported)")
     ap.add_argument("--skip", default="", help="comma list of sections to skip")
-    ap.add_argument("--reps", type=int, default=2, help="concurrency repetitions per level (best is reported)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     items = json.load(open(a.prompts))
@@ -140,8 +139,8 @@ def main():
     res = {"model": a.model}
     stream(a.base, a.model, prompts[0], 32)  # warm-up
     if "decode" not in skip:
-        res["decode_greedy"] = bench_decode(a.base, a.model, prompts, 0.0)
-        res["decode_t1"] = bench_decode(a.base, a.model, prompts, 1.0)
+        res["decode_greedy"] = bench_decode(a.base, a.model, prompts, 0.0, a.decode_reps)
+        res["decode_t1"] = bench_decode(a.base, a.model, prompts, 1.0, a.decode_reps)
     if "ttft" not in skip:
         res["ttft"] = bench_ttft(a.base, a.model, [int(x) for x in a.ttft.split(",")])
     if "concurrency" not in skip:

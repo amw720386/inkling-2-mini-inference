@@ -111,6 +111,23 @@ reads 1478-1501 tok/s, above the ~1080 ceiling of 8 tokens per 7.4 ms round). Ev
 with the fixed client (fix/serve-bench-timing). Concurrency uses wall time, TTFT and GSM8K are unaffected;
 bench_spec times in the engine.
 
+Re-measured with the fixed client (aa51785: whole-request time, median of 3 decode passes / 6 prompt rotations;
+serve_ours-fixed.json, serve_ours-bf16-fixed.json, code at 1df95e2, one container each):
+                     default (FP8 + FP4 prefill)                  bf16
+  decode greedy      322.3 (317.3 / 370.8 / 322.3)                271.3 (312.0 / 266.5 / 271.3)
+  decode T=1         266.6 (256.3 / 266.6 / 311.4)                242.8 (227.3 / 242.8 / 258.2)
+  1 request          334.4                                        275.6
+  2 requests         462.9                                        434.1
+  4 requests         577.8 (542/530/540/615/775/613)              554.0 (530/534/536/613/718/572)
+  TTFT 1k/4k/8k/30k  47.7 / 166.2 / 339.5 / 1412                  64.9 / 229.1 / 466.3 / 1886
+  GSM8K              0.84                                         0.85
+Not comparable with any best-of-2 number above, SGLang's 528-545 included.
+
+Widths on dense_fp8 (sched_widths.py, mean of 6 rotations, in process): 4 requests default 613 / width 2 564 /
+4 615 / 8 567 / plain 484; 3 requests default 565 / 488 / 569 / 532; 2 requests default 499 / 404 / 489 / 494.
+The current policy is within noise of the best fixed width in each case; no change. Without the HTTP server the 4-request
+rotations are 545 / 555 / 555 / 623 / 783 / 620, and best-of-2 only ever saw the first two, the slowest pair.
+
 Separately, greedy prompt 0 is text-dependent past EOS (first_request.py, no HTTP client, ignore-EOS): EOS at token
 58 in every run, then different continuations (different token hashes), accept length 1.3-3.6, 179-459 tok/s; bf16
 and FP8 both show it; no stall (longest gap 11 ms). The first 4-concurrent rep contains that prompt, so compare
