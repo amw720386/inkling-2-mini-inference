@@ -686,11 +686,12 @@ def _msg_up_tile_kernel(G, Hs, h_stride_t, Ms, m_stride_t, Wf, Wg, Dst, dst_stri
     r64 = rows.to(tl.int64)
     kk = tl.arange(0, RANK)
     n = pb * BN + tl.arange(0, BN)
-    g = tl.load(G + r64[:, None] * RANK + kk[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
-    wf = tl.load(Wf + n[:, None] * RANK + kk[None, :]).to(tl.float32)
-    wg = tl.load(Wg + n[:, None] * RANK + kk[None, :]).to(tl.float32)
-    f = _tanh(tl.dot(g, tl.trans(wf), input_precision="tf32x3"))
-    ga = _tanh(tl.dot(g, tl.trans(wg), input_precision="tf32x3"))
+    # g and the gate weights are bf16: a bf16 MMA with fp32 accumulation forms their products exactly
+    g = tl.load(G + r64[:, None] * RANK + kk[None, :], mask=rm[:, None], other=0.0)
+    wf = tl.load(Wf + n[:, None] * RANK + kk[None, :])
+    wg = tl.load(Wg + n[:, None] * RANK + kk[None, :])
+    f = _tanh(tl.dot(g, tl.trans(wf)))
+    ga = _tanh(tl.dot(g, tl.trans(wg)))
     h = tl.load(Hs + r64[:, None] * h_stride_t + n[None, :], mask=rm[:, None], other=0.0)
     m = tl.load(Ms + r64[:, None] * m_stride_t + n[None, :], mask=rm[:, None], other=0.0)
     o = (1.0 - f) * h + ga * m

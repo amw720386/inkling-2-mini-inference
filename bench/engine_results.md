@@ -115,7 +115,9 @@ across waves.
 
 Chunk size (`bench_prefill.py 8192 <chunk> sweep`, one machine): 2048 -> 4096 tokens per chunk: bf16 499 -> 474 ms,
 `dense_fp8` 469 -> 449, `fp4_prefill` 404 -> 381, both 374 -> 357 ms. `--prefill-chunk 4096` is an option; the
-default stays 2048 because a chunk blocks the other slots' decode steps for its duration.
+default stays 2048 because a chunk blocks the other slots' decode steps for its duration. The prefill message
+gates' rank-64 up projections then moved from 3xTF32 to plain bf16 MMAs (both operands are bf16, so the products are
+exact): 2048-token chunks 499 / 469 / 404 / 374 -> 481 / 451 / 387 / 357 ms (bf16 / dense_fp8 / fp4 / both).
 
 Short prompts (`tests/gpu/bench_ttft.py`): eager prefill launches ~800 kernels, so a prompt of up to ~48 tokens took
 ~21 ms regardless of length (launch-bound). Chunks of up to 32 tokens now replay a captured graph (one per size,
