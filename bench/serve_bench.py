@@ -2,11 +2,13 @@
 
     python bench/serve_bench.py --base http://127.0.0.1:8000/v1 --model <name> --prompts tests/reference/sglang_ref.json
 
-Everything goes through /v1/completions with token-id prompts, so tokenization and chat templates cannot differ:
+Everything but gsm8k (which sends text) goes through /v1/completions with token-id prompts, so tokenization and chat templates cannot differ:
   decode       6 reference prompts, 256 tokens, ignore_eos, greedy and temperature 1 (seeded), one request at a time;
                tok/s = completion tokens / (request sent -> stream finished), median of --decode-reps passes
-  ttft         random-token prompts of 1k / 8k / 30k tokens, max_tokens 1, a fresh prompt per run (no prefix cache)
+  ttft         random-token prompts of 1k / 4k / 8k / 30k tokens, max_tokens 1, a fresh prompt per run (no prefix cache)
   concurrency  k = 1, 2, 4 simultaneous 256-token requests, aggregate output tok/s, median of 6 prompt rotations
+  heldout      24 MT-Bench prompts nothing was tuned on, natural stopping (at most 512 tokens), k = 1, 2, 4 in flight; also
+               random1k: random 1k-token prompts, 1k tokens out (the workload of vLLM's Inkling-2-Mini pull request)
   gsm8k        200 test questions, 5-shot "Question: / Answer:" prompts from the train split, greedy, stop at
                "Question", last number vs the label (the protocol of SGLang's few_shot_gsm8k)
 Rates never use the arrival times of text: a server may send nothing for a special token, so the first or last
@@ -100,6 +102,51 @@ def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=6):
     return res
 
 
+def closed_loop(base, model, prompts, k, max_tokens, temperature, ignore_eos, seed0=None):
+    """k workers take the prompts in order until all are done: (tokens, seconds, tokens per request)."""
+    q, lock, out = list(enumerate(prompts)), threading.Lock(), [None] * len(prompts)
+
+    def work():
+        while True:
+            with lock:
+                if not q:
+                    return
+                i, ids = q.pop(0)
+            out[i] = stream(base, model, ids, max_tokens, temperature,
+                            seed=None if seed0 is None else seed0 + i, ignore_eos=ignore_eos)
+    th = [threading.Thread(target=work) for _ in range(k)]
+    t0 = time.perf_counter()
+    [x.start() for x in th]
+    [x.join() for x in th]
+    return sum(o["tokens"] for o in out), time.perf_counter() - t0, [o["tokens"] for o in out]
+
+
+def bench_heldout(base, model, prompts, ks, passes=3):
+    """Chat prompts nothing was tuned on, natural stopping, k in flight: a warm-up pass, then `passes` measured ones."""
+    res = {}
+    for temp in (0.0, 1.0):
+        for k in (ks if temp == 0.0 else (1,)):
+            closed_loop(base, model, prompts, k, 512, temp, False, None if temp == 0 else 1000)
+            runs = []
+            for p in range(passes):
+                n, dt, lens = closed_loop(base, model, prompts, k, 512, temp, False, None if temp == 0 else 2000 + 100 * p)
+                runs.append(round(n / dt, 1))
+            res[f"{'greedy' if temp == 0 else 't1'}_k{k}"] = {"tok_s": round(statistics.median(runs), 1), "runs": runs,
+                                                             "tokens": n, "tokens_per_request": lens}
+    return res
+
+
+def bench_random(base, model, ks, n_in=1024, n_out=1024):
+    """The workload of vLLM's Inkling-2-Mini pull request: random 1k-token prompts, 1k tokens out, ignore_eos, 8k requests."""
+    rng, res = random.Random(1), {}
+    mk = lambda n: [[rng.randrange(1000, 60000) for _ in range(n_in)] for _ in range(n)]  # noqa: E731
+    closed_loop(base, model, mk(2), 1, n_out, 0.0, True)
+    for k in ks:
+        n, dt, _ = closed_loop(base, model, mk(8 * k), k, n_out, 0.0, True)
+        res[str(k)] = {"tok_s": round(n / dt, 1)}
+    return res
+
+
 GSM = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/"
 
 
@@ -129,6 +176,7 @@ def main():
     ap.add_argument("--conc", default="1,2,4", help="concurrency levels")
     ap.add_argument("--reps", type=int, default=6, help="concurrency repetitions per level (median reported)")
     ap.add_argument("--decode-reps", type=int, default=3, help="passes over the decode prompts (median reported)")
+    ap.add_argument("--heldout", default="tests/reference/heldout_prompts.json")
     ap.add_argument("--skip", default="", help="comma list of sections to skip")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
@@ -146,6 +194,10 @@ def main():
     if "concurrency" not in skip:
         res["concurrency"] = bench_concurrency(a.base, a.model, prompts, [int(x) for x in a.conc.split(",")],
                                                reps=a.reps)
+    if "heldout" not in skip:
+        held = [it["input_ids"] for it in json.load(open(a.heldout))["items"]]
+        res["heldout"] = bench_heldout(a.base, a.model, held, [int(x) for x in a.conc.split(",")])
+        res["random1k"] = bench_random(a.base, a.model, [int(x) for x in a.conc.split(",")])
     if "gsm8k" not in skip:
         res["gsm8k"] = bench_gsm8k(a.base, a.model)
     print(json.dumps(res, indent=1))

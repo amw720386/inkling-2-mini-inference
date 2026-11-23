@@ -3,8 +3,9 @@
     modal run modal/serve_bench.py --engine ours          # FP8 dense + FP4 prefill, DSpark (the server default)
     modal run modal/serve_bench.py --engine ours-bf16     # --no-dense-fp8 --no-fp4-prefill
     modal run modal/serve_bench.py --engine ours --tag 2  # another container: results/serve_ours-2.json
-    modal run modal/serve_bench.py --engine ours --cap-gib 0   # this engine without the memory cap (0 = none)
+    modal run modal/serve_bench.py --engine ours --whole-card  # also sglang, vllm, vllm-fp8kv: no memory cap, own flags
     modal run modal/serve_bench.py --engine sglang        # lmsysorg/sglang:inkling-2-mini, DSpark recipe
+    modal run modal/serve_bench.py --engine vllm-fp8kv    # vLLM with an FP8 cache and FLASHINFER attention (vLLM PR #69168)
     modal run modal/serve_bench.py --engine vllm          # vllm/vllm-openai nightly, DSpark recipe
 
 Each server runs on an RTX PRO 6000 Blackwell (GB202 / sm_120) held to a 32 GB budget, and
@@ -33,7 +34,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from engine_app import image as engine_image  # noqa: E402
 
 files = [(ROOT / "bench/serve_bench.py", "/root/bench_client.py"), (ROOT / "modal/engine_app.py", "/root/engine_app.py"),
-         (ROOT / "tests/reference/sglang_ref.json", "/root/sglang_ref.json")]
+         (ROOT / "tests/reference/sglang_ref.json", "/root/sglang_ref.json"),
+         (ROOT / "tests/reference/heldout_prompts.json", "/root/heldout_prompts.json")]
 
 
 def with_files(img):
@@ -98,7 +100,7 @@ def serve_and_bench(cmd, env, port, model_name, version_cmd=None, client_args=()
     startup = time.time() - t0
     out = "/tmp/result.json"
     cp = subprocess.run([sys.executable, "/root/bench_client.py", "--base", f"http://127.0.0.1:{port}/v1",
-                         "--model", model_name, "--prompts", "/root/sglang_ref.json", "--out", out, *client_args],
+                         "--model", model_name, "--prompts", "/root/sglang_ref.json", "--heldout", "/root/heldout_prompts.json", "--out", out, *client_args],
                         capture_output=True, text=True)
     rc = cp.returncode
     print(cp.stdout[-4000:], cp.stderr[-4000:], flush=True)
@@ -156,13 +158,28 @@ def run_vllm(extra: list[str], client: tuple = ()):
 
 
 @app.local_entrypoint()
-def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = "", cap_gib: float = 32.0):
+def main(engine: str = "ours", extra: str = "", tag: str = "", client: str = "", cap_gib: float = 32.0,
+         whole_card: bool = False):
+    """--whole-card: no memory cap, every engine on its own flags; results/serve_<engine>-uncapped[-tag].json."""
+    if whole_card:
+        cap_gib = 0.0
+        own = {"sglang": "--mem-fraction-static 0.8", "vllm": "--gpu-memory-utilization 0.9 --max-model-len 32768",
+               "vllm-fp8kv": "--gpu-memory-utilization 0.9 --max-model-len 32768"}.get(engine, "")
+        extra = f"{own} {extra}".strip()
+        client = f"--ttft 1024,4096,8192,30000 {client}".strip()
+        engine_file = f"{engine}-uncapped"
+    else:
+        engine_file = engine
+        if engine == "vllm-fp8kv":  # its cache holds little under the cap: 4,096 tokens started, 12,000 did not
+            extra, client = f"--max-model-len 4096 {extra}".strip(), f"--ttft 1024 {client}".strip()
     xs = extra.split() if extra else []
     cl = tuple(client.split()) if client else ()
     fn = {"ours": lambda: run_ours.remote(xs, cl, cap_gib), "ours-bf16": lambda: run_ours.remote(["--no-dense-fp8", "--no-fp4-prefill"] + xs, cl, cap_gib),
-          "sglang": lambda: run_sglang.remote(xs, cl), "vllm": lambda: run_vllm.remote(xs, cl)}[engine]
+          "sglang": lambda: run_sglang.remote(xs, cl), "vllm": lambda: run_vllm.remote(xs, cl),
+          # vLLM with the flags of its Inkling-2-Mini 5090 pull request (vllm-project/vllm#69168)
+          "vllm-fp8kv": lambda: run_vllm.remote(["--kv-cache-dtype", "fp8", "--attention-backend", "FLASHINFER"] + xs, cl)}[engine]
     res = fn()
-    out = ROOT / "results" / f"serve_{engine}{'-' + tag if tag else ''}.json"
+    out = ROOT / "results" / f"serve_{engine_file}{'-' + tag if tag else ''}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(res, indent=1))
     print(json.dumps({k: v for k, v in res.items() if k != "error"}, indent=1)[:4000])
