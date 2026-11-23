@@ -102,10 +102,7 @@
   const els = ['#kicker', '#head', '#b1', '#b2', '#b3', '#legend', '#caveat'].map(S.$);
   const starts = [0.45, 0.6, 1.05, 1.85, 2.65, 3.45, 3.7];
   window.SCENE = { duration: 6.0 };
-  // LEAD-IN: the joined video cross-fades into this scene, so content starts 0.3 s early (0.15 s blank).
-  const LEAD = 0.3;
-  window.renderFrame = t0 => {
-    const t = t0 + LEAD;
+  window.renderFrame = t => {
     els.forEach((e, i) => S.fadeUp(e, t, starts[i], null, 0.45));
     // drafts pop in one by one
     drafts.forEach((r, i) => { const k = S.ramp(t, 1.35 + i * 0.07, 0.3); r.setAttribute('fill', C.orange); r.setAttribute('opacity', (0.15 + 0.85 * k).toFixed(3)) });
