@@ -29,6 +29,37 @@ SEEDED_GAMMA = 2.0  # fixed confidence calibration for seeded requests (reproduc
 IMAGE_TOKEN_ID = 200054
 
 
+class GpuTimer:
+    """Measured GPU time of graph replays without extra syncs: events around a replay are read once they have
+    completed (after the round's own host sync), and `harvest` hands each (key, ms) to a callback."""
+
+    def __init__(self):
+        self.events, self.pending = {}, []
+
+    def start(self, key):
+        ev = self.events.get(key)
+        if ev is None:
+            ev = self.events[key] = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        if any(k == key for k, _ in self.pending):  # still unread: skip this sample
+            return None
+        ev[0].record()
+        return ev
+
+    def stop(self, key, ev):
+        if ev is not None:
+            ev[1].record()
+            self.pending.append((key, ev))
+
+    def harvest(self, fn):
+        keep = []
+        for key, (e0, e1) in self.pending:
+            if e1.query():
+                fn(key, e0.elapsed_time(e1))
+            else:
+                keep.append((key, (e0, e1)))
+        self.pending = keep
+
+
 def _drain(gen):
     """Run a generator to completion and return its return value."""
     while True:
@@ -183,7 +214,12 @@ class Engine:
         if spec and graphs:
             self.drafter.capture(self.pool)
         self.gamma = 2.0
-        self.draft_cost, self.verify_costs, self.decode_costs = 1.0, {}, {}
+        self.draft_cost, self.verify_costs, self.decode_costs, self.draft_multi_costs = 1.0, {}, {}, {}
+        self.timer = GpuTimer()
+        self.batch_tokens: dict = {}  # (k, m) -> EMA of tokens committed per batched round (all k sequences)
+        self.batch_wall: dict = {}  # (k, m) -> EMA of a batched round's wall time (ms), host work included
+        self.plain_wall: dict = {}  # k -> EMA of a batched plain step's wall time (ms), set by the scheduler
+        self.batch_rounds: dict = {}  # k -> batched rounds so far
         self.costs = self._calibrate() if spec and graphs else {m: 1.0 + 0.1 * m for m in VERIFY_WIDTHS}
         self.verify_tokens = {m: torch.zeros(m, dtype=torch.int64, device="cuda") for m in VERIFY_WIDTHS}
         self.slot_ids: list[list[int]] = [[] for _ in range(slots)]  # tokens whose positions each slot holds
@@ -220,24 +256,60 @@ class Engine:
         draft = t(lambda: self.drafter.graphs[(self.drafter.buckets[0], 0)].replay())
         convs = (self.cache.k_conv, self.cache.v_conv, self.cache.attn_conv, self.cache.mlp_conv)
         snap = [x.clone() for x in convs]
+        # distinct tokens per row: identical rows route to the same experts and hide the cost of width and
+        # batch size (the MoE reads every hit expert); `_observe_cost` then tracks the measured replays
+        gen = torch.Generator(device="cuda").manual_seed(0)
+        for g in list(self.verify.values()) + list(self.decode_graphs.values()):
+            ids = g.batch.input_ids
+            ids.copy_(torch.randint(1000, 150000, ids.shape, generator=gen, device="cuda"))
         costs = {m: draft + t(lambda g=self.verify[(1, m)]: g.graph.replay()) for m in VERIFY_WIDTHS}
         # for the scheduler's choice between batched speculation and batched plain decode
         self.draft_cost = draft
         self.verify_costs = {km: t(lambda g=g: g.graph.replay(), 10) for km, g in self.verify.items()}
         self.decode_costs = {k: t(lambda g=g: g.graph.replay(), 10) for k, g in self.decode_graphs.items()}
+        self.draft_multi_costs = {k: draft * (1 + 0.5 * (k - 1)) for k in self.decode_graphs}  # then measured
         for x, v in zip(convs, snap):
             x.copy_(v)
         self.drafter.reset()
         return costs
 
+    COST_EMA = 0.2  # weight of a new measurement
+
+    def _observe_cost(self, key, ms: float):
+        """Online cost tracking from measured replays (GpuTimer): ("verify", k, m), ("decode", k), ("draft", k)."""
+        a = self.COST_EMA
+        if key[0] == "verify":
+            km = key[1:]
+            if km in self.verify_costs:
+                self.verify_costs[km] = (1 - a) * self.verify_costs[km] + a * ms
+                if km[0] == 1:
+                    self.costs[km[1]] = self.draft_cost + self.verify_costs[km]
+        elif key[0] == "decode" and key[1] in self.decode_costs:
+            self.decode_costs[key[1]] = (1 - a) * self.decode_costs[key[1]] + a * ms
+        elif key[0] == "draft" and key[1] in self.draft_multi_costs:
+            self.draft_multi_costs[key[1]] = (1 - a) * self.draft_multi_costs[key[1]] + a * ms
+
+    def harvest_costs(self):
+        if self.verify_costs:
+            self.timer.harvest(self._observe_cost)
+
+    def _batched_rate(self, k: int, m: int) -> float | None:
+        """Measured tokens per wall ms of batched rounds of k sequences at width m (None before a sample). Wall
+        time, not GPU time: each round's host work and syncs cost narrow widths more (they need more rounds)."""
+        tok = self.batch_tokens.get((k, m))
+        return None if tok is None else tok / self.batch_wall[(k, m)]
+
     def batched_spec_rate(self, accept_estimates: list[float]) -> tuple[float, float]:
         """(expected tokens/ms of a batched DSpark round, tokens/ms of a batched plain step) for requests
-        with these expected accepted drafts per round."""
+        with these expected accepted drafts per round: measured rates once every width has run at this k."""
         k = len(accept_estimates)
+        rate = self._batched_rate(k, self.BATCH_WIDTH.get(k, 4))
+        if rate is not None:
+            return rate, k / self.plain_wall.get(k, self.decode_costs[k])
         best = 0.0
         for m in VERIFY_WIDTHS:
             tokens = sum(1.0 + min(a, m - 1) for a in accept_estimates)
-            best = max(best, tokens / (k * self.draft_cost + self.verify_costs[(k, m)]))
+            best = max(best, tokens / (self.draft_multi_costs[k] + self.verify_costs[(k, m)]))
         return best, k / self.decode_costs[k]
 
     def _expected(self, conf: list[float], m: int, gamma: float | None = None) -> float:
@@ -258,6 +330,15 @@ class Engine:
             if rate > best_rate:
                 best, best_rate = m, rate
         return best
+
+    # common verify width of a batched round by batch size (bench/experiments/sched_widths.py, greedy): at 4
+    # requests width 4 525-533 tok/s vs 449 (2), 447-461 (8), 472 (3), 474 (6), 511-519 for the per-round
+    # confidence pick, 451-528 for a measured-rate bandit (it locked onto early lucky samples); 3 requests: 4;
+    # 2 requests: 8 (472 vs 447 for 4)
+    BATCH_WIDTH = {2: 8, 3: 4, 4: 4}
+
+    def _pick_width_batched(self, confs: list, gammas: list) -> int:
+        return self.BATCH_WIDTH.get(len(confs), 4)
 
     def _observe(self, conf: list[float], m: int, accepted: int):
         err = accepted - self._expected(conf, m)
@@ -429,6 +510,7 @@ class Engine:
                    slot: int = 0) -> tuple[list[int], int]:
         """One DSpark round for the sequence in `slot` whose anchor (sampled, not yet processed) is at P.
         Returns (new tokens: accepted drafts + the next token, rows committed = positions advanced)."""
+        self.harvest_costs()
         drafts, conf = self.drafter.draft(anchor, P, self._draft_temp(sp), slot=slot)
         info = torch.cat([conf, drafts.float()]).tolist()  # one sync
         confs, drafted = info[:7], [int(d) for d in info[7:]]
@@ -437,7 +519,9 @@ class Engine:
         vt = self.verify_tokens[m]
         vt[0] = anchor
         vt[1:].copy_(drafts[:m - 1])
+        ev = self.timer.start(("verify", 1, m)) if self.verify_costs else None
         logits, taps = self.verify[(1, m)].run(vt, [slot], [P])
+        self.timer.stop(("verify", 1, m), ev)
         if sp.temperature <= 0:
             target = logits.argmax(-1)
             acc_t = (drafts[:m - 1] == target[:m - 1]).int().cumprod(0).sum(0, keepdim=True)
@@ -462,28 +546,36 @@ class Engine:
         anchor), .sp, .gen, .stats. Returns per request (new tokens, rows committed)."""
         d = self.drafter
         drafts = []
+        t_round = time.perf_counter()
+        self.harvest_costs()
+        k = len(reqs)
+        ev = self.timer.start(("draft", k)) if self.verify_costs else None
         multi = d.draft_multi([r.out[-1] for r in reqs], [r.P for r in reqs],
                               [self._draft_temp(r.sp) for r in reqs], [r.slot for r in reqs])
+        self.timer.stop(("draft", k), ev)
         for r, (tok, conf, cand, lg_c) in zip(reqs, multi):
             q = torch.softmax(lg_c / self._draft_temp(r.sp), -1) if r.sp.temperature > 0 else None
             drafts.append((tok, conf, cand if q is not None else None, q))
-        info = torch.cat([torch.cat([c, t.float()]) for t, c, _, _ in drafts]).tolist()  # one sync
-        k = len(reqs)
-        confs = [info[i * 14:i * 14 + 7] for i in range(k)]
-        drafted = [[int(x) for x in info[i * 14 + 7:i * 14 + 14]] for i in range(k)]
-        m = max(self._pick_width(c, SEEDED_GAMMA if r.sp.seed is not None else None) for c, r in zip(confs, reqs))
-        vt = torch.empty(k * m, dtype=torch.int64, device="cuda")
-        for i, r in enumerate(reqs):
-            vt[i * m] = r.out[-1]
-            vt[i * m + 1:(i + 1) * m].copy_(drafts[i][0][:m - 1])
+        m_tok = d.m_tok[:k]  # [k, 7] drafts of batch positions 0..k-1 (the views returned above)
+        anchors = torch.tensor([r.out[-1] for r in reqs], dtype=torch.int64).to("cuda", non_blocking=True)
+        info = torch.cat([d.m_conf[:k], m_tok.float()], 1).tolist()  # one sync
+        confs = [row[:7] for row in info]
+        drafted = [[int(x) for x in row[7:]] for row in info]
+        m = self._pick_width_batched(confs, [SEEDED_GAMMA if r.sp.seed is not None else None for r in reqs])
+        vt = torch.cat([anchors[:, None], m_tok[:, :m - 1]], 1).reshape(-1)
+        ev = self.timer.start(("verify", k, m))
         logits, taps = self.verify[(k, m)].run(vt, [r.slot for r in reqs], [r.P for r in reqs])
+        self.timer.stop(("verify", k, m), ev)
         lg = logits.view(k, m, -1)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0]
         res = {}
         if greedy:
-            gi = torch.tensor(greedy, device=lg.device)
-            target = lg[gi].argmax(-1)  # [g, m]
-            dr = torch.stack([drafts[i][0][:m - 1] for i in greedy])
+            if len(greedy) == k:  # no index tensor (a blocking host-to-device copy)
+                target, dr = lg.argmax(-1), m_tok[:, :m - 1]
+            else:
+                gi = torch.tensor(greedy, dtype=torch.int64).to("cuda", non_blocking=True)
+                target = lg[gi].argmax(-1)  # [g, m]
+                dr = m_tok[gi, :m - 1]
             acc = (dr == target[:, :m - 1]).int().cumprod(1).sum(1)
             flat = torch.cat([acc[:, None], target.int()], 1).tolist()  # one sync
             for j, i in enumerate(greedy):
@@ -494,6 +586,14 @@ class Engine:
                 _, _, cand, q = drafts[i]
                 res[i] = accept_sampled(drafts[i][0][:m - 1], lg[i], cand[:m - 1], q[:m - 1], r.sp, r.gen)
         out = []
+        total = sum(res[i][0] + 1 for i in range(k))
+        wall = (time.perf_counter() - t_round) * 1e3
+        old = self.batch_tokens.get((k, m))
+        if old is None:
+            self.batch_tokens[(k, m)], self.batch_wall[(k, m)] = total, wall
+        else:
+            self.batch_tokens[(k, m)] = 0.8 * old + 0.2 * total
+            self.batch_wall[(k, m)] = 0.8 * self.batch_wall[(k, m)] + 0.2 * wall
         for i, r in enumerate(reqs):
             a, nxt = res[i]
             commit = a + 1

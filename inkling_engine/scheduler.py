@@ -255,7 +255,7 @@ class Scheduler:
             return True
         self.probe = getattr(self, "probe", 0) + 1
         spec_rate, plain_rate = self.e.batched_spec_rate([r.accept_ema for r in reqs])
-        return spec_rate > plain_rate or self.probe % 16 == 0
+        return spec_rate * 1.1 > plain_rate or self.probe % 16 == 0  # plain only when clearly better
 
     def _batched_spec_step(self, reqs):
         for r, (new, commit) in zip(reqs, self.e.batched_spec_round(reqs)):
@@ -269,16 +269,26 @@ class Scheduler:
 
     def _batched_step(self):
         e = self.e
+        t_step = time.perf_counter()
         reqs = [self.active[s] for s in sorted(self.active)]
         g = e.decode_graphs[len(reqs)]
+        e.harvest_costs()
+        ev = e.timer.start(("decode", len(reqs))) if e.verify_costs else None
         lg = g.step([r.slot for r in reqs], [r.P for r in reqs], [r.out[-1] for r in reqs])
+        e.timer.stop(("decode", len(reqs)), ev)
         if e.drafter is not None:  # keep every request's draft context current for when it runs alone
             for i, r in enumerate(reqs):
                 if r.spec_ok:
                     e.drafter.commit(g.ws.taps[i:i + 1], r.P, slot=r.slot)
         greedy = [i for i, r in enumerate(reqs) if r.sp.temperature <= 0 and not r.sp.penalized
                   and r.constraint is None]
-        picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}  # one sync
+        if len(greedy) == len(reqs):  # no index tensor (a blocking host-to-device copy)
+            picks = dict(enumerate(lg[:len(reqs)].argmax(-1).tolist()))  # one sync
+        else:
+            picks = dict(zip(greedy, lg[greedy].argmax(-1).tolist())) if greedy else {}
+        k = len(reqs)
+        wall = (time.perf_counter() - t_step) * 1e3
+        e.plain_wall[k] = wall if k not in e.plain_wall else 0.8 * e.plain_wall[k] + 0.2 * wall
         for i, r in enumerate(reqs):
             r.P += 1
             t = picks[i] if i in picks else self._pick(r, lg[i])

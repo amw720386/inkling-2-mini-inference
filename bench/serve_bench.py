@@ -86,7 +86,7 @@ def bench_ttft(base, model, lengths, reps=2):
 def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=2):
     res = {}
     for k in ks:
-        best = 0.0
+        best, rates = 0.0, []
         for rep in range(reps):
             outs = [None] * k
             th = [threading.Thread(target=lambda i=i: outs.__setitem__(
@@ -95,8 +95,10 @@ def bench_concurrency(base, model, prompts, ks=(1, 2, 4), reps=2):
             [x.start() for x in th]
             [x.join() for x in th]
             dt = time.perf_counter() - t0
-            best = max(best, sum(o["tokens"] for o in outs) / dt)
-        res[str(k)] = {"aggregate_tok_s": round(best, 1)}
+            rate = sum(o["tokens"] for o in outs) / dt
+            best = max(best, rate)
+            rates.append(round(rate, 1))
+        res[str(k)] = {"aggregate_tok_s": round(best, 1), "runs": rates}
     return res
 
 
@@ -128,6 +130,7 @@ def main():
     ap.add_argument("--ttft", default="1024,4096,8192,30000")
     ap.add_argument("--conc", default="1,2,4", help="concurrency levels")
     ap.add_argument("--skip", default="", help="comma list of sections to skip")
+    ap.add_argument("--reps", type=int, default=2, help="concurrency repetitions per level (best is reported)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     items = json.load(open(a.prompts))
@@ -142,7 +145,8 @@ def main():
     if "ttft" not in skip:
         res["ttft"] = bench_ttft(a.base, a.model, [int(x) for x in a.ttft.split(",")])
     if "concurrency" not in skip:
-        res["concurrency"] = bench_concurrency(a.base, a.model, prompts, [int(x) for x in a.conc.split(",")])
+        res["concurrency"] = bench_concurrency(a.base, a.model, prompts, [int(x) for x in a.conc.split(",")],
+                                               reps=a.reps)
     if "gsm8k" not in skip:
         res["gsm8k"] = bench_gsm8k(a.base, a.model)
     print(json.dumps(res, indent=1))

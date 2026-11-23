@@ -27,6 +27,28 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
 - MMA-based GEMVs (dense / seg): every config gives the same bits (99/99 in bench_gemv_cold.py). Pinning
   cold-best configs moved seg_gemv nothing in the engine (28.1 us either way) and wo ~0.4 us; not adopted.
 
+
+## Concurrency (4 requests)
+- Not host-bound: cProfile of the scheduler thread puts nearly all step time in GPU waits (a blocking
+  torch.tensor(..., device=) / list-indexing copy and .tolist()); a CUDA trace of a real 4-request run shows the
+  GPU busy 91.5% (adaptive) / 94.5% (plain) of the wall time (bench/experiments/sched_idle.py). The earlier
+  "6.2 ms GPU per step" came from bench_sched_overhead.py feeding one token to every slot (one expert set);
+  with 4 real sequences the bs=4 decode graph is 8.75 ms (prof_decode_batch.py), MoE 47%.
+- The width policy's costs were calibrated on identical rows: verify(4,8) 10.8 ms calibrated vs 18.4-19.3 ms
+  measured in place. Now: distinct random tokens at calibration, then online EMAs of measured replays
+  (CUDA events read after the round's own sync, GpuTimer) for verify / decode / multi-draft.
+- Batched rounds use a fixed width per batch size (sched_widths.py, greedy): 4 requests width 4 525-533 tok/s
+  vs 449 (2), 447-461 (8), 472 (3), 474 (6), 511-519 confidence pick, 451-528 measured-rate bandit;
+  3 requests 4; 2 requests 8. Speculate-vs-plain compares measured tokens per wall ms.
+- Verify input built on the device in two ops; no blocking index tensor when every request is greedy.
+- Server (serve_bench, concurrency only, standard 2 reps): 4 requests 453.9 (main) -> 496-505 tok/s;
+  2 requests 459-473 (main 472.6). SGLang: 545. Over 6 prompt rotations 4 requests range 483-657 tok/s
+  (acceptance depends on the prompts), so single runs are noisy.
+- Dropped: FP4 x FP4 tensor-core MoE for verify-sized steps (bench_verify_moe_fp4.py: no faster at T=4-32,
+  bandwidth-bound), sys.setswitchinterval(0.5 ms) in the server (479.9, worse).
+- Batched acceptance equals solo acceptance (batched_accept.py); the 4-request average is pulled down by the
+  tail once the fastest requests finish.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.
