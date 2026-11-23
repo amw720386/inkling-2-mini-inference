@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scene 1: the looped MoE</title>
+<link rel="stylesheet" href="../theme.css">
+<style>
+  html, body { margin: 0; width: var(--W); height: var(--H); background: var(--bg); overflow: hidden; }
+  canvas { position: absolute; left: 0; top: 0; }
+  #shade { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--H) * 0.36);
+           background: linear-gradient(to bottom, rgba(5,8,15,0) 0%, rgba(5,8,15,0.78) 55%, rgba(5,8,15,0.92) 100%); }
+  .beat { position: absolute; left: 64px; right: 64px; bottom: 92px; opacity: 0; }
+  .beat .label { margin-bottom: 20px; }
+  #hud { position: absolute; left: 64px; top: 56px; opacity: 0; display: flex; gap: 28px; }
+  #hud span b { font-weight: 400; color: var(--text); }
+  #hud .pass b { color: var(--orange); }
+</style>
+<script src="../lib/scene.js"></script>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="shade"></div>
+<div id="hud" class="label"><span>Visit <b id="visit">0</b> / 48</span><span class="pass">Pass <b id="pass">1</b> / 3</span></div>
+<div class="beat" id="b1"><div class="label">Inkling-2-Mini · 26B looped MoE</div><div class="headline">26B parameters. 3.4B per token.</div></div>
+<div class="beat" id="b2"><div class="label">Prelude 6 · loop 12 × 3 · coda 6</div><div class="headline">Every token makes 48 layer visits.</div></div>
+<div class="beat" id="b3"><div class="label">128 experts · top-8 · one 32 GB GPU</div><div class="headline">8 of 128 experts light up each visit.</div></div>
+<script type="module" src="opener.js"></script>
+</body>
+</html>
