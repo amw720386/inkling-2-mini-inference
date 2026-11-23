@@ -2,7 +2,7 @@
 // Frame-by-frame scene renderer: headless Chrome draws each frame at a fixed time t, ffmpeg encodes the frames.
 // Nothing is screen-captured in real time, so every render of a scene is identical.
 //
-//   node render.js <scene.html> <out.mp4> [--w 1080] [--h 1080] [--fps 30] [--crf 12] [--stills 0.5,3,5.9]
+//   node render.js <scene.html[?query]> <out.mp4> [--w 1080] [--h 1080] [--fps 30] [--crf 12] [--stills 0.5,3,5.9]
 //
 // A scene page defines:
 //   window.SCENE = { duration: <seconds>, ready: <optional Promise> }
@@ -46,7 +46,8 @@ function findChrome() {
   page.on('console', m => { if (m.type() === 'error' || m.type() === 'warn') console.error('[page]', m.text()) });
   page.on('pageerror', e => { console.error('[page error]', e.message); process.exitCode = 1 });
   await page.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
-  await page.goto('file://' + path.resolve(sceneArg) + `?w=${W}&h=${H}`, { waitUntil: 'load' });
+  const [scenePath, sceneQuery] = sceneArg.split('?');
+  await page.goto('file://' + path.resolve(scenePath) + `?${sceneQuery ? sceneQuery + '&' : ''}w=${W}&h=${H}`, { waitUntil: 'load' });
   await page.waitForFunction('window.SCENE && window.renderFrame');
   await page.evaluate(async () => { await document.fonts.ready; if (window.SCENE.ready) await window.SCENE.ready });
   const dur = await page.evaluate(() => window.SCENE.duration);
