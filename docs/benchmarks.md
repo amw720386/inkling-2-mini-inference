@@ -16,8 +16,8 @@ of these ran
 | server end-to-end test | 25.4 GiB |
 | soak test | 25.6 GiB |
 
-Before the kernel settings were pinned, a first start needed 31.3-31.5 GiB and ran out of memory here
-([experiments.md](experiments.md)). The 5090 has the same GB202 / sm_120 chip with 170 SMs and similar rated memory
+Before the kernel settings were pinned, a first start needed 31.3 GiB (default) and 31.5 GiB (bf16) with more memory free,
+and the default setup ran out of memory at 31.0 GiB ([experiments.md](experiments.md)). The 5090 has the same GB202 / sm_120 chip with 170 SMs and similar rated memory
 bandwidth, so the kernels run and decode, which is memory-bound, should carry over. GeForce cards run bf16 tensor-core
 math with fp32 accumulation at half the PRO card's rate, so bf16 prefill should be slower there and the FP8 / FP4 paths
 should gain more. Nothing has been run on a 5090, so no speed here is a 5090 speed.
@@ -81,8 +81,9 @@ Every column has the same order as with the cap, except TTFT at 30k, where vLLM 
 1422-1426 ms). SGLang's and vLLM's decode rates barely change; vLLM's 30k prefill now fits.
 
 **vLLM** could not hold a 32k context in this budget. It reported 7.3 GiB of KV cache left after weights, which is
-about 6.9k tokens, so it ran with `--max-model-len 6144`. Its 8k and 30k TTFT are therefore missing, and its
-concurrency numbers look starved by the small cache. On a GPU with more memory it would do better.
+about 6.9k tokens, so it ran with `--max-model-len 6144`. Its 8k and 30k TTFT are therefore missing here.
+Without the cap it holds them, but its 4-request rate doesn't improve (341 and 439 tok/s uncapped vs 435 and 439 capped;
+2 requests 320 vs 302).
 
 ## In-process numbers
 
