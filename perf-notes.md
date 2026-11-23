@@ -18,6 +18,14 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   rank matrix; integer results equal to the old kernel (bench_route_sort.py, incl. heavy collisions).
   Per launch: P=64 3.31 -> 1.78 us, P=128 8.74 -> 2.16, P=256 (4 slots x width 8) 17.4 -> 3.86.
   bench_concurrency 4 requests 424 -> 432 tok/s; single-stream verify change is below container noise.
+- NVFP4 decode MoE GEMV configs pinned from DRAM-cold timings. The autotuner times L2-hot repeats (a layer's 8
+  experts fit in L2) and picked 8 warps for w13; cold (bench_moe_cold.py, random experts per step over a
+  128-expert layer): w13 T=1 27.8 -> 14.8 us, T=2 33.9 -> 25.4, T=3 46.6 -> 35.0; w2 T=2 21.1 -> 15.7. Same BK
+  as the engine's picks (print_configs.py), same bits. bench_round decode 5.61 -> 5.47 ms, verify(2) 6.72 ->
+  6.40 ms; bench_spec plain 177.9 tok/s (same-day 173.9), DSpark 341.0, 8k DSpark 317.3; patterns unchanged.
+  MXFP8 (layers 20-23) faster configs change bits: left on the autotuner.
+- MMA-based GEMVs (dense / seg): every config gives the same bits (99/99 in bench_gemv_cold.py). Pinning
+  cold-best configs moved seg_gemv nothing in the engine (28.1 us either way) and wo ~0.4 us; not adopted.
 
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
