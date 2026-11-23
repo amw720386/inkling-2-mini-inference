@@ -151,6 +151,7 @@
     }
     if (o.extra) { const e = o.extra(x + pad, cy, w - 2 * pad); inner.appendChild(e.g); cy += e.h }
     const h = Math.max(o.h || 0, cy - y + pad - 4);
+    inner.setAttribute('data-box', [x + 2, y + 2, w - 4, h - 4].join(','));   // audit: text must stay inside the card
     g.appendChild(card(P, x, y, w, h, { stroke: o.stroke, fill: o.fill, sw: o.sw }));
     if (o.accent) g.appendChild(rect(x + 0.5, y + 10, 2, h - 20, { rx: 1, fill: o.accent }));
     g.appendChild(inner);

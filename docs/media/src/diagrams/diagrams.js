@@ -49,7 +49,7 @@
     const dec = B('eng', { label: 'DECODE', title: 'one CUDA graph replay per step', accent: P.blue, bullets: [
       'graphs for 1 to 4 requests and for verify widths',
       'DSpark drafts 7 tokens, the target verifies'] }, decY);
-    const ker = B('ker', { label: 'KERNELS · ops/', title: 'Triton, no custom C++', bullets: [
+    const ker = B('ker', { label: 'KERNELS · ops/', title: 'Triton, no custom\u00a0C++', bullets: [
       'attention: split-K, sinks, gate',
       'MoE: FP4 GEMV, grouped tiles, FP4 tensor cores',
       'GEMV bf16 / FP8, short convs',
@@ -387,12 +387,12 @@
 
     // PDL panel
     const px = tx + 10, pw = W - 40 - px;
-    const pdl = box(P, px, top - 30, pw, { label: 'PROGRAMMATIC DEPENDENT LAUNCH', title: 'Each kernel starts before the last one ends',
+    const pdl = box(P, px, top - 30, pw, { label: 'PDL \u00b7 PROGRAMMATIC LAUNCH', title: 'Each kernel starts before the last one ends',
       titleSize: 16, accent: P.blue, plain: true, bodySize: 13, bullets: [
         'It prefetches its weights or cached K/V into L2, then waits on its predecessor. None of that load depends on the previous kernel.'],
       extra: (ex, ey, ew) => {
         const g = el('g'); const bh = 18, gap = 9;
-        const ks = [['seg_gemv', 0, 0.36], ['qkv_post', 0.3, 0.5], ['attention', 0.44, 0.86], ['combine', 0.8, 0.94]];
+        const ks = [['seg_gemv', 0, 0.3], ['qkv_post', 0.25, 0.42], ['attention', 0.37, 0.66], ['combine', 0.61, 0.72]];
         ks.forEach(([n, a, b], i) => {
           const y = ey + 14 + i * (bh + gap), x = ex + a * ew, w = (b - a) * ew;
           const pre = Math.min(0.07 * ew, w * 0.35);
@@ -408,7 +408,7 @@
         return { g, h: ly + 20 - ey };
       } });
     s.appendChild(pdl.g);
-    const res = box(P, px, top - 30 + pdl.h + 16, pw, { label: 'MEASURED (bench/bench_pdl.py)', plain: true, bodySize: 13,
+    const res = box(P, px, top - 30 + pdl.h + 16, pw, { label: 'MEASURED \u00b7 bench_pdl.py', plain: true, bodySize: 13,
       title: 'decode step: 6.08 to 5.66 ms', titleSize: 16, bullets: ['verify step, width 8: 8.68 to 8.27 ms'] });
     s.appendChild(res.g);
 

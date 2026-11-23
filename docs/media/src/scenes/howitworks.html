@@ -21,6 +21,8 @@
   .box svg { display: block; overflow: visible; }
   .arrow { flex: 0 0 calc(var(--s) * 52px); display: flex; align-items: center; justify-content: center; }
   .wide .arrow { flex-basis: calc(var(--s) * 72px); }
+  .wide #row { justify-content: center; }
+  .wide .box { flex: 0 1 calc(var(--s) * 460px); }
   #legend { margin-top: calc(var(--s) * 26px); display: flex; gap: calc(var(--s) * 26px); flex-wrap: wrap;
             font: 400 calc(var(--s) * 15px)/1 var(--sans); color: var(--muted); }
   #legend span { display: inline-flex; align-items: center; gap: calc(var(--s) * 8px); }
@@ -41,7 +43,7 @@
       <div class="body">48 layer visits, ~12 fused Triton kernels each, one graph replay</div><div class="glyph" id="g2"></div></div>
     <div class="arrow" id="a2"></div>
     <div class="box card" id="b3"><div class="label">Verify</div>
-      <div class="body">keeps the longest matching prefix; width 2, 4 or 8 per round</div><div class="glyph" id="g3"></div></div>
+      <div class="body">keeps the longest matching prefix; width 2,&nbsp;4&nbsp;or&nbsp;8 per round</div><div class="glyph" id="g3"></div></div>
   </div>
   <div id="legend">
     <span><i style="background:var(--blue)"></i>active expert</span>

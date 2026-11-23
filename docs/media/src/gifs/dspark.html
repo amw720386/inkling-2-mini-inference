@@ -49,7 +49,7 @@
     s.appendChild(text(X0, ROW.target + 20, 'TARGET', F.label(11), P.blue));
     s.appendChild(text(X0, ROW.target + 36, 'width 8', F.body(12), P.muted));
     s.appendChild(text(X0, ROW.next + 27, 'NEXT', F.label(11), P.muted));
-    for (let c = 0; c < COLS; c++) {
+    for (let c = 0; c < 8; c++) {           // anchor + 7 drafts; the column after D7 holds only a NEXT token
       s.appendChild(rect(colX(c), ROW.target, CW, TH, { rx: 7, stroke: P.border, sw: 1, dash: '2 4' }));
     }
     s.appendChild(text(colX(0) + CW / 2, ROW.target - 10, 'ANCHOR', F.label(9.5), P.dim, { anchor: 'middle' }));
