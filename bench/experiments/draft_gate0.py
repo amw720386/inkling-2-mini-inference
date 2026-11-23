@@ -1,12 +1,14 @@
 """Where the drafter loses acceptance, teacher-forced on fixed text (greedy, EOS respected, prompts outside every
 benchmark). Text is generated once by the bf16 target (plain); each profile replays it through verify(1, 8) and the
 drafter proposes 7 tokens from every position, so profiles differ only in numerics.
-Modal: parity --args "draft_gate0.py [answer tokens]"
+Modal: parity --args "draft_gate0.py [answer tokens] [shortlists]"; with "shortlists" it compares draft shortlists
+(/cache/draft_shortlist_mix.bin, from build_shortlist.py mix) on the fp8 + fp4 prefill profile instead, with 16 more non-English prompts.
 """
 
 import gc
 import glob
 import random
+import shutil
 import sys
 
 import torch
@@ -57,6 +59,18 @@ PROMPTS = {
 }
 src = [open(f, encoding="utf-8").read() for f in sorted(glob.glob("/root/inkling_engine/*.py")
                                                        + glob.glob("/root/bench/*.py"))]
+SHORTLISTS = len(sys.argv) > 3 and sys.argv[3] == "shortlists"
+if SHORTLISTS:
+    PROMPTS["other"] += [
+        "Racconta in italiano la leggenda di Romolo e Remo in breve.", "Leg in het Nederlands uit hoe een vulkaan werkt.",
+        "Opowiedz po polsku, jak powstaje miód.", "Beskriv på svenska hur man bakar kanelbullar.",
+        "한국어로 세종대왕에 대해 짧게 설명해 주세요.", "हिन्दी में बताइए कि बारिश कैसे होती है।",
+        "Türkçe olarak çayın nasıl demlendiğini anlat.", "Tiếng Việt: giải thích quang hợp là gì.",
+        "ไทย: อธิบายวิธีทำข้าวผัดอย่างง่าย", "Explique em francês como funciona uma bateria.",
+        "Schreibe auf Deutsch einen kurzen Brief an die Nachbarn wegen einer Feier.",
+        "Escribe en español un resumen de cómo se forman los huracanes.", "Напиши по-русски короткую сказку о лисе.",
+        "用中文写一个关于勤奋的小故事。", "日本語で、健康的な朝食の例を五つ挙げてください。",
+        "اكتب بالعربية فقرة عن أهمية النوم."]
 rng = random.Random(0)
 PROMPTS["long"] = []
 for q in ["What does this code do overall?", "List the classes defined here and their purpose.",
@@ -164,6 +178,49 @@ def paired(x, y):
     print(f"paired p{x} - p{y} = {diff(idx):+.4f}, 95% [{bs[25]:+.4f}, {bs[974]:+.4f}]", flush=True)
 
 
+if SHORTLISTS:
+    # the drafter reads its packaged list: swap the file in this container (the engine is unchanged)
+    data = ds.Path(ds.__file__).parent / "data" / "draft_shortlist.bin"
+    shutil.copy(data, "/tmp/en.bin")
+    files = {"en": "/tmp/en.bin", "mix": "/cache/draft_shortlist_mix.bin"}
+    variants = [("en 32k", "en", 32768), ("mix 32k", "mix", 32768), ("en 48k", "en", 49152), ("mix 48k", "mix", 49152),
+                ("mix 64k", "mix", 65536)]
+    for name, file, rows in variants:
+        shutil.copy(files[file], data)
+        eng = make(name, shortlist=rows, dense_fp8=True, fp4_prefill=True)
+        if "own" not in texts:
+            gen(eng, "own")
+        sl = set(eng.drafter.short_ids.tolist())
+        n_out = sum(x not in sl for (c, _), ts in zip(items, texts["own"]) for x in ts if c == "other")
+        n_oth = sum(len(ts) for (c, _), ts in zip(items, texts["own"]) if c == "other")
+        print(f"{name}: other-language text tokens outside the shortlist {n_out / n_oth:.4f}")
+        t0 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        g = eng.drafter.graphs[(eng.drafter.buckets[0], 0)]
+        for _ in range(3):
+            g.replay()
+        torch.cuda.synchronize()
+        t0[0].record()
+        for _ in range(200):
+            g.replay()
+        t0[1].record()
+        torch.cuda.synchronize()
+        print(f"{name}: draft graph {t0[0].elapsed_time(t0[1]) / 200:.3f} ms")
+        run(name, eng, "own")
+        free(eng)
+        del eng
+    for name, _, _ in variants[1:]:
+        paired((name, "own"), ("en 32k", "own"))
+        for t in PROMPTS:
+            x, y = res[(name, "own")], res[("en 32k", "own")]
+            ii = [i for i, (c, _) in enumerate(items) if c == t and x[i] and y[i]]
+            g = random.Random(2)
+
+            def diff(js):
+                return stats([r for j in js for r in x[j]])["p"] - stats([r for j in js for r in y[j]])["p"]
+
+            bs = sorted(diff([g.choice(ii) for _ in ii]) for _ in range(1000))
+            print(f"   {name} - en 32k, {t}: {diff(ii):+.4f} [{bs[25]:+.4f}, {bs[974]:+.4f}]", flush=True)
+    sys.exit(0)
 eng = make("bf16")
 gen(eng, "bf16")
 flat = [t for ts in texts["bf16"] for t in ts]
