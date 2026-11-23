@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from .ops.draft_triton import add_rms, qk_norm_rope, silu_mul
+from .ops.draft_triton import add_rms, ctx_kv_store, ctx_mix, qk_norm_rope, silu_mul
 from .ops.gemv_triton import Fp8Weight
 from .ops.markov_triton import MarkovHead
 from .ops.gemv_triton import mm as dense_mm
@@ -97,6 +97,8 @@ class Drafter:
                 "w_down": t[p + "mlp.down_proj.weight"],
             })
         self.final_norm, self.mask_embed = t["norm.weight"], t["mask_embed"]
+        # context mixes in one launch: the three layers' ctx norms and the Markov head's f norm
+        self.mix_w = torch.stack([L["ctx_norm"] for L in self.layers] + [t["markov_head.dflare_norm.weight"]])
         # FP8 copies for the drafter's big GEMVs (base logits over the vocab, layer projections)
         V0 = self.head.shape[0]
         rank_file = Path(__file__).parent / "data" / "draft_shortlist.bin"
@@ -188,21 +190,15 @@ class Drafter:
         self.lengths[slot] = start + n
 
     def _commit(self, feats, positions):
-        n = feats.shape[0]
+        """Fused: one launch for the four context mixes, then per layer one GEMM and one K-norm / rotary /
+        ring-scatter launch (the eager version was ~240 small kernels per commit)."""
+        mixed = ctx_mix(feats.contiguous(), self.alpha, self.mix_w, EPS)  # [4, n, D]
         for l, L in enumerate(self.layers):
-            c = mix_rmsnorm(feats, self.alpha[l], L["ctx_norm"])
-            kv = bf(c @ L["kv_ctx"].T)
-            k = kv[:, :KV_HEADS * HEAD_DIM].reshape(-1, KV_HEADS, HEAD_DIM)
-            k = rope(bf(rms(k, L["k_norm_ctx"])), positions)
-            v = kv[:, KV_HEADS * HEAD_DIM:].reshape(-1, KV_HEADS, HEAD_DIM)
+            kv = mixed[l] @ L["kv_ctx"].T
             size = WINDOW if l in LOCAL else self.ctx
-            keep = min(n, size)
-            slots = positions[-keep:] % size
-            self.k_ctx[l][slots] = k[-keep:]
-            self.v_ctx[l][slots] = v[-keep:]
-            if l in LOCAL:
-                self.ctx_pos[l][slots] = positions[-keep:]
-        self.f_rnn.copy_(mix_rmsnorm(feats[-1:], self.alpha[3], self.f_norm)[0])
+            ctx_kv_store(kv, positions, L["k_norm_ctx"], self.k_ctx[l], self.v_ctx[l],
+                         self.ctx_pos[l] if l in LOCAL else None, size, KV_HEADS, HEAD_DIM, ROPE_THETA, EPS)
+        self.f_rnn.copy_(mixed[3, -1])
 
     # ------------------------------------------------------------------- draft
     def _project(self, L, xn, positions, out):

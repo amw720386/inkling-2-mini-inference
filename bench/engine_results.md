@@ -9,8 +9,8 @@ torch 2.9.1+cu128; Triton 3.5.1, Triton 3.6.0 from 2026-11-22 on).
 
 | | plain | DSpark | 8k prompt plain | 8k prompt DSpark |
 |---|---:|---:|---:|---:|
-| bf16 | 167.5 tok/s | 328.1 tok/s | 158.4 tok/s | 310.1 tok/s |
-| `dense_fp8` | 204.6 tok/s | 342.4 tok/s | 189.0 tok/s | 310.6 tok/s |
+| bf16 | 172.0 tok/s | 323.6 tok/s | 163.8 tok/s | 316.0 tok/s |
+| `dense_fp8` | 214.1 tok/s | 353.0 tok/s | 196.7 tok/s | 328.3 tok/s |
 
 (2026-11-22, Triton 3.6.0; Triton 3.5.1 gave the same within run-to-run variation for bf16: 160.0 / 284.6. Separate
 Modal machines differ by a few percent in decode. `dense_fp8` now reads the FP8 copies at every step size, including
@@ -47,7 +47,9 @@ Acceptance changed little (up on 4 of 6 prompts); DSpark 294 -> 321 tok/s, 8k-pr
 218 -> 239; 2 / 4 concurrent requests 372 / 399 tok/s. Shortlist size (`INKLING_DRAFT_SHORTLIST`, DSpark greedy / 8k /
 temperature 1): 16k 318 / 293 / 211, 32k 321-324 / 306-308 / 236-239, 64k 315-319 / 307-308 / 239-247 tok/s; 32k
 stays the default (64k's edge at temperature 1 is within run-to-run noise). Unsorted candidate top-k and a bf16
-tensor-core GEMM for the Markov head's step-independent projection: draft 0.63 -> 0.58 ms (4 slots: 1.42 ms).
+tensor-core GEMM for the Markov head's step-independent projection: draft 0.63 -> 0.58 ms (4 slots: 1.42 ms). Drafter
+commit fused (`tests/gpu/prof_commit.py`): one launch for the four context mixes, one K-norm / rotary / ring-scatter
+launch per layer, instead of ~240 small kernels: commit(4) 0.247 -> 0.047 ms (max diff vs the eager math 0.002).
 
 DSpark acceptance length (accepted drafts + 1 per round) ranges 1.9-5.5 by prompt. Fused Triton Markov head (draft 1.91 -> 1.50 ms). Graph replay costs
 (`tests/gpu/bench_round.py`, bf16): decode 6.30 ms, draft 1.86 ms, verify m=2/4/8 7.82/9.40/10.22 ms.
@@ -174,7 +176,7 @@ GSM8K, 200 test questions, 5-shot, greedy, DSpark on (`tests/gpu/gsm8k_eval.py`)
 
 | | accuracy |
 |---|---:|
-| engine bf16 | 0.835 (0.840 re-run after prefill/scheduler/vision/PDL changes) |
+| engine bf16 | 0.835 (0.840 after prefill/scheduler/vision changes; 0.860 after PDL and the drafter work) |
 | engine `dense_fp8` | 0.825 (0.855 with FP8 prefill projections) |
 | engine bf16 + `fp4_prefill` | 0.850 |
 | SGLang Balanced (baseline) | 0.850 |
