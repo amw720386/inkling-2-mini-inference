@@ -23,6 +23,9 @@ from ..quant import ExpertWeight
 from .moe_triton import _swiglu_pairs_2d, plan_tiles
 
 def check_support():
+    cap = torch.cuda.get_device_capability()
+    if cap < (12, 0):
+        raise RuntimeError(f"fp4_prefill needs FP4 tensor cores (sm_120), found sm_{cap[0]}{cap[1]}")
     major, minor = (int(v) for v in triton.__version__.split(".")[:2])
     if (major, minor) < (3, 6):
         raise RuntimeError(f"fp4_prefill needs Triton >= 3.6 (NVFP4 tl.dot_scaled on sm_120), found {triton.__version__}")
