@@ -49,3 +49,7 @@ Summation-order noise, not a regression.
 - bench_spec / bench_concurrency greedy DSpark outputs vary run to run: verify widths follow the calibrated
   round timings. bench_spec run-to-run noise is about +-3% on DSpark (332 vs 340 tok/s, same code); use bench_round graph
   timings for small changes.
+- Grouped small-M MoE (verify T >= 4): all 78-81 configs bit-equal, engine picks within 3% of cold best
+  (bench_grouped_cold.py); nothing to gain.
+- FP8 GEMVs (drafter, dense_fp8): configs are not all bit-equal; cold best is 1-1.5 us per call faster
+  (dense_fp8 wo 7.9 -> 6.4 us); not pursued.
