@@ -1,0 +1,390 @@
+{
+ "model": "/weights/Inkling-2-Mini",
+ "decode_greedy": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     307.6,
+     307.4,
+     307.1
+    ]
+   },
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     248.4,
+     248.8,
+     248.9
+    ]
+   },
+   {
+    "prompt_tokens": 28,
+    "tok_s": [
+     164.3,
+     164.4,
+     164.5
+    ]
+   },
+   {
+    "prompt_tokens": 32,
+    "tok_s": [
+     198.5,
+     207.4,
+     207.3
+    ]
+   },
+   {
+    "prompt_tokens": 5,
+    "tok_s": [
+     481.1,
+     483.5,
+     482.7
+    ]
+   },
+   {
+    "prompt_tokens": 8,
+    "tok_s": [
+     363.7,
+     363.6,
+     365.3
+    ]
+   }
+  ],
+  "runs": [
+   258.3,
+   260.9,
+   261.0
+  ],
+  "overall_tok_s": 260.9
+ },
+ "decode_t1": {
+  "per_prompt": [
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     245.9,
+     226.7,
+     154.5
+    ]
+   },
+   {
+    "prompt_tokens": 25,
+    "tok_s": [
+     319.0,
+     290.1,
+     257.3
+    ]
+   },
+   {
+    "prompt_tokens": 28,
+    "tok_s": [
+     167.9,
+     185.6,
+     179.7
+    ]
+   },
+   {
+    "prompt_tokens": 32,
+    "tok_s": [
+     241.1,
+     193.1,
+     201.5
+    ]
+   },
+   {
+    "prompt_tokens": 5,
+    "tok_s": [
+     155.5,
+     173.2,
+     187.4
+    ]
+   },
+   {
+    "prompt_tokens": 8,
+    "tok_s": [
+     321.6,
+     146.1,
+     394.3
+    ]
+   }
+  ],
+  "runs": [
+   223.5,
+   193.3,
+   208.6
+  ],
+  "overall_tok_s": 208.6
+ },
+ "ttft": {
+  "1024": {
+   "ttft_ms": 61.3,
+   "prefill_tok_s": 16695
+  },
+  "4096": {
+   "ttft_ms": 192.5,
+   "prefill_tok_s": 21282
+  },
+  "8192": {
+   "ttft_ms": 364.7,
+   "prefill_tok_s": 22462
+  },
+  "30000": {
+   "ttft_ms": 1485.5,
+   "prefill_tok_s": 20195
+  }
+ },
+ "concurrency": {
+  "1": {
+   "aggregate_tok_s": 280.8,
+   "runs": [
+    310.5,
+    251.1,
+    166.8,
+    209.2,
+    490.1,
+    364.8
+   ]
+  },
+  "2": {
+   "aggregate_tok_s": 283.8,
+   "runs": [
+    271.4,
+    322.5,
+    296.2,
+    155.0,
+    475.5,
+    231.9
+   ]
+  },
+  "4": {
+   "aggregate_tok_s": 369.0,
+   "runs": [
+    146.2,
+    462.9,
+    474.5,
+    365.6,
+    185.1,
+    372.4
+   ]
+  }
+ },
+ "heldout": {
+  "greedy_k1": {
+   "tok_s": 212.5,
+   "runs": [
+    203.8,
+    212.6,
+    212.5
+   ],
+   "tokens": 9476,
+   "tokens_per_request": [
+    512,
+    205,
+    465,
+    332,
+    407,
+    512,
+    512,
+    337,
+    247,
+    345,
+    128,
+    204,
+    512,
+    323,
+    512,
+    131,
+    466,
+    512,
+    429,
+    512,
+    456,
+    512,
+    393,
+    512
+   ]
+  },
+  "greedy_k2": {
+   "tok_s": 331.5,
+   "runs": [
+    331.8,
+    331.5,
+    331.3
+   ],
+   "tokens": 8957,
+   "tokens_per_request": [
+    512,
+    204,
+    406,
+    359,
+    323,
+    512,
+    353,
+    399,
+    378,
+    275,
+    125,
+    197,
+    512,
+    343,
+    512,
+    147,
+    320,
+    374,
+    418,
+    512,
+    419,
+    512,
+    333,
+    512
+   ]
+  },
+  "greedy_k4": {
+   "tok_s": 416.3,
+   "runs": [
+    410.6,
+    465.4,
+    416.3
+   ],
+   "tokens": 9298,
+   "tokens_per_request": [
+    512,
+    187,
+    512,
+    512,
+    393,
+    512,
+    450,
+    377,
+    407,
+    268,
+    128,
+    190,
+    512,
+    385,
+    512,
+    168,
+    195,
+    322,
+    376,
+    512,
+    493,
+    512,
+    351,
+    512
+   ]
+  },
+  "t1_k1": {
+   "tok_s": 207.2,
+   "runs": [
+    207.2,
+    210.6,
+    202.9
+   ],
+   "tokens": 9184,
+   "tokens_per_request": [
+    512,
+    180,
+    512,
+    368,
+    512,
+    512,
+    308,
+    352,
+    273,
+    415,
+    101,
+    166,
+    512,
+    348,
+    512,
+    148,
+    342,
+    363,
+    394,
+    512,
+    422,
+    512,
+    396,
+    512
+   ]
+  }
+ },
+ "random1k": {
+  "1": {
+   "tok_s": 294.4
+  },
+  "2": {
+   "tok_s": 217.6
+  },
+  "4": {
+   "tok_s": 400.4
+  }
+ },
+ "server_accept_log": [
+  "(APIServer pid=5) INFO 11-23 21:44:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.05, Accepted throughput: 72.90 tokens/s, Drafted throughput: 485.07 tokens/s, Accepted: 729 tokens, Drafted: 4851 tokens, Verified: 4851 tokens, Per-position acceptance rate: 0.553, 0.254, 0.121, 0.059, 0.039, 0.016, 0.010, Avg Draft acceptance rate: 15.0%",
+  "(APIServer pid=5) INFO 11-23 21:44:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.16, Accepted throughput: 101.60 tokens/s, Drafted throughput: 614.59 tokens/s, Accepted: 1016 tokens, Drafted: 6146 tokens, Verified: 6146 tokens, Per-position acceptance rate: 0.574, 0.282, 0.151, 0.081, 0.039, 0.018, 0.011, Avg Draft acceptance rate: 16.5%",
+  "(APIServer pid=5) INFO 11-23 21:44:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 151.28 tokens/s, Drafted throughput: 530.52 tokens/s, Accepted: 1513 tokens, Drafted: 5306 tokens, Verified: 5306 tokens, Per-position acceptance rate: 0.665, 0.455, 0.310, 0.219, 0.156, 0.108, 0.083, Avg Draft acceptance rate: 28.5%",
+  "(APIServer pid=5) INFO 11-23 21:44:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.74, Accepted throughput: 195.39 tokens/s, Drafted throughput: 783.96 tokens/s, Accepted: 1954 tokens, Drafted: 7840 tokens, Verified: 7840 tokens, Per-position acceptance rate: 0.646, 0.406, 0.265, 0.179, 0.116, 0.079, 0.054, Avg Draft acceptance rate: 24.9%",
+  "(APIServer pid=5) INFO 11-23 21:44:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.06, Accepted throughput: 134.49 tokens/s, Drafted throughput: 886.14 tokens/s, Accepted: 1345 tokens, Drafted: 8862 tokens, Verified: 8862 tokens, Per-position acceptance rate: 0.547, 0.262, 0.130, 0.066, 0.036, 0.014, 0.006, Avg Draft acceptance rate: 15.2%",
+  "(APIServer pid=5) INFO 11-23 21:44:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.68, Accepted throughput: 229.29 tokens/s, Drafted throughput: 956.17 tokens/s, Accepted: 2293 tokens, Drafted: 9562 tokens, Verified: 9562 tokens, Per-position acceptance rate: 0.626, 0.388, 0.253, 0.166, 0.112, 0.075, 0.058, Avg Draft acceptance rate: 24.0%",
+  "(APIServer pid=5) INFO 11-23 21:45:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.54, Accepted throughput: 200.78 tokens/s, Drafted throughput: 909.91 tokens/s, Accepted: 2008 tokens, Drafted: 9100 tokens, Verified: 9100 tokens, Per-position acceptance rate: 0.615, 0.365, 0.225, 0.145, 0.092, 0.062, 0.041, Avg Draft acceptance rate: 22.1%",
+  "(APIServer pid=5) INFO 11-23 21:45:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.15, Accepted throughput: 156.89 tokens/s, Drafted throughput: 952.64 tokens/s, Accepted: 1569 tokens, Drafted: 9527 tokens, Verified: 9527 tokens, Per-position acceptance rate: 0.569, 0.281, 0.149, 0.079, 0.043, 0.019, 0.012, Avg Draft acceptance rate: 16.5%",
+  "(APIServer pid=5) INFO 11-23 21:45:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.04, Accepted throughput: 276.56 tokens/s, Drafted throughput: 947.65 tokens/s, Accepted: 2766 tokens, Drafted: 9478 tokens, Verified: 9478 tokens, Per-position acceptance rate: 0.678, 0.459, 0.318, 0.227, 0.162, 0.114, 0.085, Avg Draft acceptance rate: 29.2%",
+  "(APIServer pid=5) INFO 11-23 21:45:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.16, Accepted throughput: 146.88 tokens/s, Drafted throughput: 885.38 tokens/s, Accepted: 1469 tokens, Drafted: 8855 tokens, Verified: 8855 tokens, Per-position acceptance rate: 0.558, 0.289, 0.151, 0.084, 0.045, 0.022, 0.012, Avg Draft acceptance rate: 16.6%",
+  "(APIServer pid=5) INFO 11-23 21:45:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.27, Accepted throughput: 177.47 tokens/s, Drafted throughput: 976.33 tokens/s, Accepted: 1775 tokens, Drafted: 9765 tokens, Verified: 9765 tokens, Per-position acceptance rate: 0.586, 0.314, 0.175, 0.098, 0.052, 0.029, 0.018, Avg Draft acceptance rate: 18.2%",
+  "(APIServer pid=5) INFO 11-23 21:45:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.00, Accepted throughput: 272.59 tokens/s, Drafted throughput: 955.46 tokens/s, Accepted: 2726 tokens, Drafted: 9555 tokens, Verified: 9555 tokens, Per-position acceptance rate: 0.673, 0.451, 0.313, 0.221, 0.154, 0.106, 0.079, Avg Draft acceptance rate: 28.5%",
+  "(APIServer pid=5) INFO 11-23 21:46:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.05, Accepted throughput: 120.59 tokens/s, Drafted throughput: 807.70 tokens/s, Accepted: 1206 tokens, Drafted: 8078 tokens, Verified: 8078 tokens, Per-position acceptance rate: 0.529, 0.261, 0.124, 0.064, 0.038, 0.020, 0.010, Avg Draft acceptance rate: 14.9%",
+  "(APIServer pid=5) INFO 11-23 21:46:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.28, Accepted throughput: 120.58 tokens/s, Drafted throughput: 657.90 tokens/s, Accepted: 1206 tokens, Drafted: 6580 tokens, Verified: 6580 tokens, Per-position acceptance rate: 0.584, 0.301, 0.163, 0.101, 0.061, 0.043, 0.031, Avg Draft acceptance rate: 18.3%",
+  "(APIServer pid=5) INFO 11-23 21:46:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.27, Accepted throughput: 175.49 tokens/s, Drafted throughput: 540.36 tokens/s, Accepted: 1755 tokens, Drafted: 5404 tokens, Verified: 5404 tokens, Per-position acceptance rate: 0.689, 0.504, 0.355, 0.271, 0.201, 0.144, 0.110, Avg Draft acceptance rate: 32.5%",
+  "(APIServer pid=5) INFO 11-23 21:46:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.26, Accepted throughput: 162.79 tokens/s, Drafted throughput: 905.76 tokens/s, Accepted: 1628 tokens, Drafted: 9058 tokens, Verified: 9058 tokens, Per-position acceptance rate: 0.577, 0.314, 0.168, 0.093, 0.055, 0.031, 0.021, Avg Draft acceptance rate: 18.0%",
+  "(APIServer pid=5) INFO 11-23 21:46:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.25, Accepted throughput: 218.87 tokens/s, Drafted throughput: 1227.66 tokens/s, Accepted: 2189 tokens, Drafted: 12278 tokens, Verified: 12278 tokens, Per-position acceptance rate: 0.573, 0.299, 0.166, 0.097, 0.058, 0.033, 0.022, Avg Draft acceptance rate: 17.8%",
+  "(APIServer pid=5) INFO 11-23 21:46:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.80, Accepted throughput: 338.50 tokens/s, Drafted throughput: 1317.42 tokens/s, Accepted: 3385 tokens, Drafted: 13174 tokens, Verified: 13174 tokens, Per-position acceptance rate: 0.651, 0.412, 0.261, 0.195, 0.129, 0.088, 0.061, Avg Draft acceptance rate: 25.7%",
+  "(APIServer pid=5) INFO 11-23 21:47:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.28, Accepted throughput: 247.00 tokens/s, Drafted throughput: 1348.18 tokens/s, Accepted: 2470 tokens, Drafted: 13482 tokens, Verified: 13482 tokens, Per-position acceptance rate: 0.574, 0.304, 0.166, 0.105, 0.066, 0.039, 0.028, Avg Draft acceptance rate: 18.3%",
+  "(APIServer pid=5) INFO 11-23 21:47:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.63, Accepted throughput: 288.59 tokens/s, Drafted throughput: 1242.44 tokens/s, Accepted: 2886 tokens, Drafted: 12425 tokens, Verified: 12425 tokens, Per-position acceptance rate: 0.619, 0.384, 0.235, 0.155, 0.107, 0.073, 0.053, Avg Draft acceptance rate: 23.2%",
+  "(APIServer pid=5) INFO 11-23 21:47:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.18, Accepted throughput: 189.77 tokens/s, Drafted throughput: 1122.63 tokens/s, Accepted: 1898 tokens, Drafted: 11228 tokens, Verified: 11228 tokens, Per-position acceptance rate: 0.564, 0.294, 0.153, 0.082, 0.047, 0.027, 0.016, Avg Draft acceptance rate: 16.9%",
+  "(APIServer pid=5) INFO 11-23 21:47:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.76, Accepted throughput: 342.19 tokens/s, Drafted throughput: 1360.05 tokens/s, Accepted: 3422 tokens, Drafted: 13601 tokens, Verified: 13601 tokens, Per-position acceptance rate: 0.631, 0.401, 0.269, 0.189, 0.127, 0.085, 0.058, Avg Draft acceptance rate: 25.2%",
+  "(APIServer pid=5) INFO 11-23 21:47:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.97, Accepted throughput: 87.60 tokens/s, Drafted throughput: 632.10 tokens/s, Accepted: 876 tokens, Drafted: 6321 tokens, Verified: 6321 tokens, Per-position acceptance rate: 0.526, 0.259, 0.101, 0.047, 0.027, 0.009, 0.002, Avg Draft acceptance rate: 13.9%",
+  "(APIServer pid=5) INFO 11-23 21:47:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.11, Accepted throughput: 93.80 tokens/s, Drafted throughput: 592.17 tokens/s, Accepted: 938 tokens, Drafted: 5922 tokens, Verified: 5922 tokens, Per-position acceptance rate: 0.550, 0.292, 0.148, 0.076, 0.027, 0.013, 0.004, Avg Draft acceptance rate: 15.8%",
+  "(APIServer pid=5) INFO 11-23 21:48:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.33, Accepted throughput: 193.78 tokens/s, Drafted throughput: 582.35 tokens/s, Accepted: 1938 tokens, Drafted: 5824 tokens, Verified: 5824 tokens, Per-position acceptance rate: 0.713, 0.514, 0.363, 0.270, 0.203, 0.155, 0.111, Avg Draft acceptance rate: 33.3%",
+  "(APIServer pid=5) INFO 11-23 21:48:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.70, Accepted throughput: 144.99 tokens/s, Drafted throughput: 595.68 tokens/s, Accepted: 1450 tokens, Drafted: 5957 tokens, Verified: 5957 tokens, Per-position acceptance rate: 0.670, 0.432, 0.247, 0.165, 0.092, 0.059, 0.040, Avg Draft acceptance rate: 24.3%",
+  "(APIServer pid=5) INFO 11-23 21:48:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.93, Accepted throughput: 79.19 tokens/s, Drafted throughput: 594.93 tokens/s, Accepted: 792 tokens, Drafted: 5950 tokens, Verified: 5950 tokens, Per-position acceptance rate: 0.506, 0.229, 0.104, 0.055, 0.022, 0.011, 0.005, Avg Draft acceptance rate: 13.3%",
+  "(APIServer pid=5) INFO 11-23 21:48:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.08, Accepted throughput: 90.89 tokens/s, Drafted throughput: 591.42 tokens/s, Accepted: 909 tokens, Drafted: 5915 tokens, Verified: 5915 tokens, Per-position acceptance rate: 0.551, 0.279, 0.135, 0.064, 0.026, 0.013, 0.007, Avg Draft acceptance rate: 15.4%",
+  "(APIServer pid=5) INFO 11-23 21:48:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.76, Accepted throughput: 147.77 tokens/s, Drafted throughput: 587.20 tokens/s, Accepted: 1478 tokens, Drafted: 5873 tokens, Verified: 5873 tokens, Per-position acceptance rate: 0.641, 0.404, 0.275, 0.185, 0.117, 0.081, 0.058, Avg Draft acceptance rate: 25.2%",
+  "(APIServer pid=5) INFO 11-23 21:48:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.16, Accepted throughput: 180.57 tokens/s, Drafted throughput: 586.50 tokens/s, Accepted: 1806 tokens, Drafted: 5866 tokens, Verified: 5866 tokens, Per-position acceptance rate: 0.703, 0.470, 0.335, 0.247, 0.180, 0.136, 0.084, Avg Draft acceptance rate: 30.8%",
+  "(APIServer pid=5) INFO 11-23 21:49:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.14, Accepted throughput: 97.09 tokens/s, Drafted throughput: 597.73 tokens/s, Accepted: 971 tokens, Drafted: 5978 tokens, Verified: 5978 tokens, Per-position acceptance rate: 0.557, 0.290, 0.150, 0.081, 0.036, 0.014, 0.008, Avg Draft acceptance rate: 16.2%",
+  "(APIServer pid=5) INFO 11-23 21:49:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.09, Accepted throughput: 91.99 tokens/s, Drafted throughput: 590.76 tokens/s, Accepted: 920 tokens, Drafted: 5908 tokens, Verified: 5908 tokens, Per-position acceptance rate: 0.536, 0.278, 0.145, 0.075, 0.036, 0.014, 0.007, Avg Draft acceptance rate: 15.6%",
+  "(APIServer pid=5) INFO 11-23 21:49:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.20, Accepted throughput: 101.99 tokens/s, Drafted throughput: 594.24 tokens/s, Accepted: 1020 tokens, Drafted: 5943 tokens, Verified: 5943 tokens, Per-position acceptance rate: 0.594, 0.306, 0.159, 0.068, 0.045, 0.021, 0.008, Avg Draft acceptance rate: 17.2%",
+  "(APIServer pid=5) INFO 11-23 21:49:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.14, Accepted throughput: 178.08 tokens/s, Drafted throughput: 582.34 tokens/s, Accepted: 1781 tokens, Drafted: 5824 tokens, Verified: 5824 tokens, Per-position acceptance rate: 0.694, 0.475, 0.320, 0.242, 0.175, 0.135, 0.101, Avg Draft acceptance rate: 30.6%",
+  "(APIServer pid=5) INFO 11-23 21:49:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.77, Accepted throughput: 150.39 tokens/s, Drafted throughput: 594.27 tokens/s, Accepted: 1504 tokens, Drafted: 5943 tokens, Verified: 5943 tokens, Per-position acceptance rate: 0.667, 0.424, 0.271, 0.160, 0.111, 0.077, 0.062, Avg Draft acceptance rate: 25.3%",
+  "(APIServer pid=5) INFO 11-23 21:49:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.96, Accepted throughput: 82.00 tokens/s, Drafted throughput: 596.40 tokens/s, Accepted: 820 tokens, Drafted: 5964 tokens, Verified: 5964 tokens, Per-position acceptance rate: 0.538, 0.259, 0.097, 0.040, 0.018, 0.007, 0.004, Avg Draft acceptance rate: 13.7%",
+  "(APIServer pid=5) INFO 11-23 21:50:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.11, Accepted throughput: 93.59 tokens/s, Drafted throughput: 587.96 tokens/s, Accepted: 936 tokens, Drafted: 5880 tokens, Verified: 5880 tokens, Per-position acceptance rate: 0.580, 0.292, 0.133, 0.063, 0.029, 0.014, 0.004, Avg Draft acceptance rate: 15.9%",
+  "(APIServer pid=5) INFO 11-23 21:50:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.65, Accepted throughput: 138.98 tokens/s, Drafted throughput: 590.73 tokens/s, Accepted: 1390 tokens, Drafted: 5908 tokens, Verified: 5908 tokens, Per-position acceptance rate: 0.621, 0.398, 0.242, 0.162, 0.102, 0.070, 0.052, Avg Draft acceptance rate: 23.5%",
+  "(APIServer pid=5) INFO 11-23 21:50:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.91, Accepted throughput: 159.29 tokens/s, Drafted throughput: 582.36 tokens/s, Accepted: 1593 tokens, Drafted: 5824 tokens, Verified: 5824 tokens, Per-position acceptance rate: 0.661, 0.424, 0.291, 0.209, 0.148, 0.106, 0.076, Avg Draft acceptance rate: 27.4%",
+  "(APIServer pid=5) INFO 11-23 21:50:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.19, Accepted throughput: 102.59 tokens/s, Drafted throughput: 602.66 tokens/s, Accepted: 1026 tokens, Drafted: 6027 tokens, Verified: 6027 tokens, Per-position acceptance rate: 0.560, 0.289, 0.164, 0.085, 0.053, 0.027, 0.014, Avg Draft acceptance rate: 17.0%",
+  "(APIServer pid=5) INFO 11-23 21:50:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.24, Accepted throughput: 107.78 tokens/s, Drafted throughput: 608.89 tokens/s, Accepted: 1078 tokens, Drafted: 6090 tokens, Verified: 6090 tokens, Per-position acceptance rate: 0.326, 0.230, 0.192, 0.154, 0.133, 0.103, 0.100, Avg Draft acceptance rate: 17.7%",
+  "(APIServer pid=5) INFO 11-23 21:50:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.21, Accepted throughput: 196.78 tokens/s, Drafted throughput: 624.34 tokens/s, Accepted: 1968 tokens, Drafted: 6244 tokens, Verified: 6244 tokens, Per-position acceptance rate: 0.503, 0.445, 0.420, 0.402, 0.386, 0.033, 0.017, Avg Draft acceptance rate: 31.5%",
+  "(APIServer pid=5) INFO 11-23 21:51:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.74, Accepted throughput: 67.69 tokens/s, Drafted throughput: 642.47 tokens/s, Accepted: 677 tokens, Drafted: 6426 tokens, Verified: 6426 tokens, Per-position acceptance rate: 0.282, 0.232, 0.074, 0.054, 0.035, 0.035, 0.025, Avg Draft acceptance rate: 10.5%",
+  "(APIServer pid=5) INFO 11-23 21:51:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.31, Accepted throughput: 211.68 tokens/s, Drafted throughput: 642.54 tokens/s, Accepted: 2117 tokens, Drafted: 6426 tokens, Verified: 6426 tokens, Per-position acceptance rate: 0.802, 0.414, 0.386, 0.330, 0.273, 0.056, 0.046, Avg Draft acceptance rate: 32.9%",
+  "(APIServer pid=5) INFO 11-23 21:51:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 3.22, Accepted throughput: 176.58 tokens/s, Drafted throughput: 557.15 tokens/s, Accepted: 1766 tokens, Drafted: 5572 tokens, Verified: 5572 tokens, Per-position acceptance rate: 0.539, 0.445, 0.413, 0.413, 0.405, 0.004, 0.000, Avg Draft acceptance rate: 31.7%",
+  "(APIServer pid=5) INFO 11-23 21:51:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.05, Accepted throughput: 7.30 tokens/s, Drafted throughput: 1029.57 tokens/s, Accepted: 73 tokens, Drafted: 10297 tokens, Verified: 10297 tokens, Per-position acceptance rate: 0.050, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, Avg Draft acceptance rate: 0.7%",
+  "(APIServer pid=5) INFO 11-23 21:51:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.05, Accepted throughput: 6.70 tokens/s, Drafted throughput: 1018.37 tokens/s, Accepted: 67 tokens, Drafted: 10185 tokens, Verified: 10185 tokens, Per-position acceptance rate: 0.046, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, Avg Draft acceptance rate: 0.7%",
+  "(APIServer pid=5) INFO 11-23 21:51:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.11, Accepted throughput: 15.60 tokens/s, Drafted throughput: 1028.86 tokens/s, Accepted: 156 tokens, Drafted: 10290 tokens, Verified: 10290 tokens, Per-position acceptance rate: 0.106, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, Avg Draft acceptance rate: 1.5%",
+  "(APIServer pid=5) INFO 11-23 21:52:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.16, Accepted throughput: 174.77 tokens/s, Drafted throughput: 1058.94 tokens/s, Accepted: 1748 tokens, Drafted: 10591 tokens, Verified: 10591 tokens, Per-position acceptance rate: 0.339, 0.262, 0.166, 0.149, 0.132, 0.069, 0.039, Avg Draft acceptance rate: 16.5%",
+  "(APIServer pid=5) INFO 11-23 21:52:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.24, Accepted throughput: 172.08 tokens/s, Drafted throughput: 974.99 tokens/s, Accepted: 1721 tokens, Drafted: 9751 tokens, Verified: 9751 tokens, Per-position acceptance rate: 0.511, 0.401, 0.126, 0.098, 0.086, 0.008, 0.006, Avg Draft acceptance rate: 17.6%",
+  "(APIServer pid=5) INFO 11-23 21:52:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.20, Accepted throughput: 172.28 tokens/s, Drafted throughput: 1007.90 tokens/s, Accepted: 1723 tokens, Drafted: 10080 tokens, Verified: 10080 tokens, Per-position acceptance rate: 0.444, 0.365, 0.160, 0.109, 0.069, 0.028, 0.023, Avg Draft acceptance rate: 17.1%",
+  "(APIServer pid=5) INFO 11-23 21:52:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.06, Accepted throughput: 4.70 tokens/s, Drafted throughput: 511.65 tokens/s, Accepted: 47 tokens, Drafted: 5117 tokens, Verified: 5117 tokens, Per-position acceptance rate: 0.064, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, Avg Draft acceptance rate: 0.9%",
+  "(APIServer pid=5) INFO 11-23 21:52:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.91, Accepted throughput: 136.19 tokens/s, Drafted throughput: 498.37 tokens/s, Accepted: 1362 tokens, Drafted: 4984 tokens, Verified: 4984 tokens, Per-position acceptance rate: 0.496, 0.473, 0.471, 0.236, 0.230, 0.007, 0.000, Avg Draft acceptance rate: 27.3%",
+  "(APIServer pid=5) INFO 11-23 21:52:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.92, Accepted throughput: 142.50 tokens/s, Drafted throughput: 1089.18 tokens/s, Accepted: 1425 tokens, Drafted: 10892 tokens, Verified: 10892 tokens, Per-position acceptance rate: 0.283, 0.203, 0.193, 0.087, 0.080, 0.039, 0.031, Avg Draft acceptance rate: 13.1%",
+  "(APIServer pid=5) INFO 11-23 21:53:09 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.91, Accepted throughput: 203.58 tokens/s, Drafted throughput: 1573.44 tokens/s, Accepted: 2036 tokens, Drafted: 15736 tokens, Verified: 15736 tokens, Per-position acceptance rate: 0.332, 0.246, 0.145, 0.072, 0.048, 0.032, 0.031, Avg Draft acceptance rate: 12.9%",
+  "(APIServer pid=5) INFO 11-23 21:53:19 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.07, Accepted throughput: 241.27 tokens/s, Drafted throughput: 1578.98 tokens/s, Accepted: 2413 tokens, Drafted: 15792 tokens, Verified: 15792 tokens, Per-position acceptance rate: 0.277, 0.219, 0.195, 0.176, 0.156, 0.026, 0.022, Avg Draft acceptance rate: 15.3%",
+  "(APIServer pid=5) INFO 11-23 21:53:29 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.21, Accepted throughput: 182.68 tokens/s, Drafted throughput: 1052.71 tokens/s, Accepted: 1827 tokens, Drafted: 10528 tokens, Verified: 10528 tokens, Per-position acceptance rate: 0.283, 0.237, 0.232, 0.231, 0.229, 0.003, 0.000, Avg Draft acceptance rate: 17.4%",
+  "(APIServer pid=5) INFO 11-23 21:53:39 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.94, Accepted throughput: 441.35 tokens/s, Drafted throughput: 1588.81 tokens/s, Accepted: 4414 tokens, Drafted: 15890 tokens, Verified: 15890 tokens, Per-position acceptance rate: 0.721, 0.552, 0.293, 0.150, 0.125, 0.067, 0.036, Avg Draft acceptance rate: 27.8%",
+  "(APIServer pid=5) INFO 11-23 21:53:49 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 2.91, Accepted throughput: 435.64 tokens/s, Drafted throughput: 1597.90 tokens/s, Accepted: 4357 tokens, Drafted: 15981 tokens, Verified: 15981 tokens, Per-position acceptance rate: 0.499, 0.424, 0.315, 0.276, 0.249, 0.080, 0.067, Avg Draft acceptance rate: 27.3%",
+  "(APIServer pid=5) INFO 11-23 21:53:59 [metrics.py:136] SpecDecoding metrics: Mean acceptance length: 1.58, Accepted throughput: 76.99 tokens/s, Drafted throughput: 937.22 tokens/s, Accepted: 770 tokens, Drafted: 9373 tokens, Verified: 9373 tokens, Per-position acceptance rate: 0.235, 0.165, 0.072, 0.034, 0.025, 0.024, 0.020, Avg Draft acceptance rate: 8.2%"
+ ],
+ "startup_s": 171,
+ "peak_gpu_mib": 86248,
+ "version": "0.34.0rc1.dev1133+g647a76866"
+}
