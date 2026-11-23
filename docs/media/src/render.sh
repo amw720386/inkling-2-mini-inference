@@ -26,7 +26,7 @@ render_scene() {  # page WxH out.mp4
 }
 
 clip_dur() {  # seconds, from ffmpeg's header line (no ffprobe needed)
-  ffmpeg -hide_banner -i "$1" 2>&1 | sed -n 's/.*Duration: \([0-9:.]*\).*/\1/p' | awk -F: '{print $1*3600 + $2*60 + $3}'
+  { ffmpeg -hide_banner -i "$1" 2>&1 || true; } | sed -n 's/.*Duration: \([0-9:.]*\).*/\1/p' | awk -F: '{print $1*3600 + $2*60 + $3}'
 }
 
 # Join clips with $XF s cross-fades (each clip keeps its first and last $XF s visually stable).
@@ -68,7 +68,7 @@ if [ "$WHAT" = all ] || [ "$WHAT" = gifs ]; then
     ffmpeg -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=${dither}:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
     echo "wrote $OUT/$name.gif ($(du -h "$OUT/$name.gif" | cut -f1))"
   done <<'GIFS'
-scenes/gif-race.html 960x540 30 race bayer:bayer_scale=4
+scenes/gif-race.html 960x540 30 race none
 3d/opener.html?gif=1 1280x720 15 loop bayer:bayer_scale=4
 3d/memory.html?gif=1 1280x720 15 memory bayer:bayer_scale=4
 gifs/dspark.html 960x540 20 dspark none
