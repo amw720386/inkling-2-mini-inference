@@ -5,119 +5,119 @@
    {
     "prompt_tokens": 25,
     "tokens": 256,
-    "tok_s": 375.1
+    "tok_s": 385.1
    },
    {
     "prompt_tokens": 25,
     "tokens": 256,
-    "tok_s": 357.3
+    "tok_s": 366.2
    },
    {
     "prompt_tokens": 28,
     "tokens": 256,
-    "tok_s": 233.4
+    "tok_s": 240.8
    },
    {
     "prompt_tokens": 32,
     "tokens": 256,
-    "tok_s": 203.3
+    "tok_s": 206.6
    },
    {
     "prompt_tokens": 5,
     "tokens": 256,
-    "tok_s": 531.2
+    "tok_s": 538.8
    },
    {
     "prompt_tokens": 8,
     "tokens": 256,
-    "tok_s": 429.7
+    "tok_s": 443.3
    }
   ],
-  "overall_tok_s": 317.8
+  "overall_tok_s": 325.5
  },
  "decode_t1": {
   "per_prompt": [
    {
     "prompt_tokens": 25,
     "tokens": 256,
-    "tok_s": 717.7
+    "tok_s": 743.9
    },
    {
     "prompt_tokens": 25,
     "tokens": 256,
-    "tok_s": 314.4
+    "tok_s": 329.7
    },
    {
     "prompt_tokens": 28,
     "tokens": 256,
-    "tok_s": 202.6
+    "tok_s": 204.3
    },
    {
     "prompt_tokens": 32,
     "tokens": 256,
-    "tok_s": 232.0
+    "tok_s": 237.1
    },
    {
     "prompt_tokens": 5,
     "tokens": 256,
-    "tok_s": 147.0
+    "tok_s": 151.2
    },
    {
     "prompt_tokens": 8,
     "tokens": 256,
-    "tok_s": 326.2
+    "tok_s": 334.6
    }
   ],
-  "overall_tok_s": 253.3
+  "overall_tok_s": 259.8
  },
  "ttft": {
   "1024": {
-   "ttft_ms": 64.9,
-   "prefill_tok_s": 15769
+   "ttft_ms": 65.9,
+   "prefill_tok_s": 15530
   },
   "4096": {
-   "ttft_ms": 231.3,
-   "prefill_tok_s": 17707
+   "ttft_ms": 231.0,
+   "prefill_tok_s": 17733
   },
   "8192": {
-   "ttft_ms": 475.2,
-   "prefill_tok_s": 17239
+   "ttft_ms": 467.8,
+   "prefill_tok_s": 17512
   },
   "30000": {
-   "ttft_ms": 2007.8,
-   "prefill_tok_s": 14942
+   "ttft_ms": 1883.8,
+   "prefill_tok_s": 15925
   }
  },
  "concurrency": {
   "1": {
-   "aggregate_tok_s": 326.6,
+   "aggregate_tok_s": 332.5,
    "runs": [
-    168.7,
-    326.6
+    173.4,
+    332.5
    ]
   },
   "2": {
-   "aggregate_tok_s": 475.2,
+   "aggregate_tok_s": 474.0,
    "runs": [
-    475.2,
-    334.8
+    474.0,
+    344.3
    ]
   },
   "4": {
-   "aggregate_tok_s": 525.8,
+   "aggregate_tok_s": 532.5,
    "runs": [
-    525.8,
-    525.1
+    530.5,
+    532.5
    ]
   }
  },
  "gsm8k": {
   "n": 200,
-  "accuracy": 0.85,
-  "seconds": 141
+  "accuracy": 0.855,
+  "seconds": 183
  },
  "server_accept_log": [],
  "startup_s": 42,
- "peak_gpu_mib": 29336,
+ "peak_gpu_mib": 32295,
  "version": "2.9.1+cu128 3.6.0"
 }
