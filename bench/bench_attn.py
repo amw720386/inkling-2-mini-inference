@@ -57,6 +57,9 @@ ABLATIONS = {
     "gather": _gather,
     "no_bias": [(BIAS.strip(), "bias = tl.zeros((ROWS, BN), tl.bfloat16)")],
 }
+REF = "/root/bench/experiments/_attn_ref_src.py"  # optional: an older kernel source to compare bit for bit
+if os.path.exists(REF):
+    ABLATIONS["ref"] = lambda src: open(REF, encoding="utf-8").read()
 
 
 def variant(name):
@@ -136,6 +139,9 @@ for kind, cap, ring, window in (("local", W + 64, W + 64, W), ("global", START +
                 ref_out = out
             elif name == "gather":
                 print("  gather vs table rel err", ((out - ref_out).norm() / ref_out.norm()).item())
+            elif name == "ref":
+                print("  ref (older source) bit-equal to full:", torch.equal(out, ref_out),
+                      "max abs diff", (out - ref_out).abs().max().item())
             ms = timed(fn)
             kv_bytes = 2 * min(keys, START + T) * KVH * D * 2
             print(f"{kind:6s} {name:15s} tok {tok:3d} splits {meta.n_split:2d}: {ms * 1000:7.1f} us  "

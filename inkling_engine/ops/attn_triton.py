@@ -139,7 +139,29 @@ def _attn_kernel(
     acc = tl.zeros((ROWS, D), tl.float32)
     kcache_base = KCache + slot * cache_stride_slot + kvh * D
     vcache_base = VCache + slot * cache_stride_slot + kvh * D
-    for b in tl.range(b0, b1):
+    bnear = b0
+    if WINDOW == 0:
+        # key blocks whose nearest pair is >= R apart: cached keys, every pair valid and causal, relative bias 0. A
+        # loop of their own without the bias gather, masks and chunk K/V loads (same block order, same values:
+        # the general loop adds a masked 0.0 bias). 28k-token context, global layer: 6.4 -> ~5 ms per chunk.
+        far = start + q0 - R - (BN - 1) - kmin  # last key position of block b is kmin + b * BN + BN - 1
+        n_far = tl.minimum(tl.where(far >= 0, far // BN + 1, 0), (start - kmin) // BN)  # and wholly in the cache
+        bnear = tl.minimum(tl.maximum(n_far, b0), b1)
+        for b in tl.range(b0, bnear):
+            kpos = kmin + b * BN + tl.arange(0, BN)
+            cidx = kpos.to(tl.int64)
+            k = tl.load(kcache_base + cidx[:, None] * cache_stride_pos + d[None, :]).to(tl.bfloat16)
+            s = tl.dot(q, tl.trans(k)) * scale
+            s = tl.where(row_ok[:, None], s, float("-inf"))
+            m_new = tl.maximum(m_i, tl.max(s, 1))
+            m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+            alpha = tl.exp(m_i - m_safe)
+            p = tl.exp(s - m_safe[:, None])
+            l_i = l_i * alpha + tl.sum(p, 1)
+            v = tl.load(vcache_base + cidx[:, None] * cache_stride_pos + d[None, :]).to(tl.bfloat16)
+            acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
+            m_i = m_new
+    for b in tl.range(bnear, b1):
         kpos = kmin + b * BN + tl.arange(0, BN)
         k_ok = kpos <= kmax
         from_cache = kpos < start

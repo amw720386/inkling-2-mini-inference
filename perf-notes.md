@@ -86,6 +86,15 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   317.8, T=1 253.3, GSM8K 0.85; dense_fp8 concurrency: 4 requests 547.2 (528.7 / 547.2), 2 requests 514.9.
   main: 454 / 473 / 280 / 262 (bf16), 474 / 502 (dense_fp8). SGLang: 528-545 / 278-338 / 241 / 201.
 
+
+## Long context
+- Attention, full-attention layers: key blocks whose nearest pair is >= rel_extent (1024) apart and that are
+  wholly in the cache run in a loop of their own without the relative-bias gather, masks and chunk K/V loads
+  (same block order, values bit-identical: the general loop added a masked 0.0 bias). bench_attn.py (last
+  2048-token chunk, global layer): 28k context 6498 -> 4118 us, 8k context 1642 -> 1193 us, bit-equal to the
+  previous kernel; local layers unchanged. Prefill bf16 30k 1998 -> 1892 ms (fp4_prefill 1537, both 1425);
+  8k unchanged (467). longctx.py: 131k prefill 26.3 -> 15.0 s, decode at 131k plain 112 -> 118, DSpark 123 -> 189.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.
