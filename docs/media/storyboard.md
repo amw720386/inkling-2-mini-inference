@@ -33,11 +33,11 @@ measured 2026-11-23; regenerate with `tools/results_table.py`):
 
 | | this engine (default) | bf16 | SGLang | vLLM 0.34 |
 |---|---:|---:|---:|---:|
-| decode, greedy, 1 request (tok/s) | **344** | 273 | 232 | 235 |
-| decode, temperature 1 (tok/s) | 264 | 239 | 192 | 212 |
-| TTFT 8k (ms) | 341 | 467 | 434 | does not fit |
-| 2 / 4 concurrent (tok/s) | 464 / **571** | 437 / 554 | 298 / 514 | 302 / 437 |
-| GSM8K, n = 200 | 0.837 | 0.853 | 0.845 | 0.840 |
+| decode, greedy, 1 request (tok/s) | **322** | 273 | 232 | 235 |
+| decode, temperature 1 (tok/s) | 267 | 239 | 192 | 212 |
+| TTFT 8k (ms) | 343 | 467 | 434 | does not fit |
+| 2 / 4 concurrent (tok/s) | 463 / **576** | 437 / 554 | 298 / 514 | 302 / 437 |
+| GSM8K, n = 200 | 0.835 | 0.853 | 0.845 | 0.840 |
 
 Earlier figures (363, 325, 280, 545 vs 474) are withdrawn. Still to do before release:
 
@@ -116,7 +116,7 @@ Three boxes joined by arrows, each with a caps label, a two-line body and a smal
 3. `VERIFY` / "keeps the longest matching prefix; width 2, 4 or 8 per round" / glyph: tiles green then one red
 
 Legend line: `■ active expert  ■ draft token  ■ accepted`. Caveat, one line: `Measured on an RTX PRO 6000
-Blackwell. 4 concurrent requests: 571 tok/s vs 514 (SGLang) and 437 (vLLM).`
+Blackwell. 4 concurrent requests: 576 tok/s vs 514 (SGLang) and 437 (vLLM).`
 
 ### Scene 4: memory, 17.6-20.6 s
 
@@ -129,8 +129,8 @@ graphs, free. Headline: `Four 32k contexts in 32 GB.` Then the slots merge into 
 
 - Kicker: `INKLING-2-MINI · ONE 32 GB GPU`
 - Headline: `Faster decode than SGLang and vLLM.`
-- Three zero-based bars growing in: this engine 344, SGLang 232, vLLM 235 tok/s (beside the text in 16:9)
-- Context: `One request, greedy: medians over containers, same GPU, same 32 GB budget, server default. 4 requests: 571 vs 514 (SGLang) and 437 (vLLM) tok/s. Python and Triton.`
+- Three zero-based bars growing in: this engine 322, SGLang 232, vLLM 235 tok/s (beside the text in 16:9)
+- Context: `One request, greedy: medians over containers, same GPU, same 32 GB budget, server default. 4 requests: 576 vs 514 (SGLang) and 437 (vLLM) tok/s. Python and Triton.`
 - URL: `github.com/amw720386/inkling-2-mini-inference`
 - Bottom: `MADE AT MAGNI`
 

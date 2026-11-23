@@ -3,10 +3,24 @@
 **Hardware.** Every number here comes from an NVIDIA RTX PRO 6000 Blackwell on Modal, with the engine held to a
 32 GB budget: 188 SMs and about 1.5 TB/s measured memory bandwidth.
 
-**RTX 5090.** The engine should carry over well: a 5090 has the same GB202 / sm_120 chip (170 SMs), similar rated
-memory bandwidth, and 32 GB. Decode is memory-bound. GeForce cards run bf16 tensor-core math with fp32 accumulation
-at half the PRO card's rate, so bf16 prefill should be slower there and the FP8 / FP4 paths should gain more. None of
-this has been measured on a 5090.
+**RTX 5090.** Does it fit? A second process filled the card until only 31.0 GiB was free (a 5090 has 32607 MiB =
+31.84 GiB in total), so the engine ran into a real device limit. Each job started from its own empty kernel cache, and all
+of these ran
+(`tests/gpu/fit_5090.py`, device peak from `nvidia-smi`, including the CUDA context):
+
+| | peak of 31.0 GiB |
+|---|---:|
+| default (FP8 + FP4), 4 slots x 32k, four 31k-token prompts at once, twice | 28.5 GiB |
+| bf16, the same | 28.6 GiB |
+| 256k context, one 250k-token prompt | 27.5 GiB |
+| server end-to-end test | 25.4 GiB |
+| soak test | 25.6 GiB |
+
+Before the kernel settings were pinned, a first start needed 31.3-31.5 GiB and ran out of memory here
+([experiments.md](experiments.md)). The 5090 has the same GB202 / sm_120 chip with 170 SMs and similar rated memory
+bandwidth, so the kernels run and decode, which is memory-bound, should carry over. GeForce cards run bf16 tensor-core
+math with fp32 accumulation at half the PRO card's rate, so bf16 prefill should be slower there and the FP8 / FP4 paths
+should gain more. Nothing has been run on a 5090, so no speed here is a 5090 speed.
 
 ## Same GPU, same client: this engine vs vLLM vs SGLang
 
@@ -14,7 +28,7 @@ this has been measured on a 5090.
 
 | | decode, greedy | decode, T=1 | 2 concurrent | 4 concurrent | TTFT 1k | TTFT 4k | TTFT 8k | TTFT 30k | GSM8K | peak GPU |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| this engine (4) | 344 | 264 | 464 | 571 | 48 ms | 167 ms | 341 ms | 1420 ms | 0.837 | 28.8 GiB |
+| this engine (5) | 322 | 267 | 463 | 576 | 48 ms | 168 ms | 343 ms | 1421 ms | 0.835 | 28.8 GiB |
 | this engine, bf16 (2) | 273 | 239 | 437 | 554 | 65 ms | 230 ms | 467 ms | 1884 ms | 0.853 | 28.6 GiB |
 | vLLM (2) | 235 | 212 | 302 | 437 | 60 ms | 184 ms | - | - | 0.840 | 32.3 GiB |
 | SGLang (5) | 232 | 192 | 298 | 514 | 67 ms | 223 ms | 434 ms | 1675 ms | 0.845 | 31.4 GiB |
@@ -29,9 +43,11 @@ differ. Measured 2026-11-23: SGLang `lmsysorg/sglang:inkling-2-mini`, vLLM 0.34.
 torch 2.9.1 and Triton 3.6. Raw files: `results/serve_*.json`, one per container; the table is their median
 (`tools/results_table.py`, `--spread` for every container).
 
-**Spread between containers** (lowest - highest): decode greedy 322-366 (ours) vs 232-233 (SGLang); T=1 262-267 vs
-190-193; 2 requests 458-467 vs 281-312; 4 requests 554-579 vs 500-538. Single-request decode past the natural end of
-an answer varies by run.
+**Spread between containers** (lowest - highest): decode greedy 320-366 (ours) vs 232-233 (SGLang) and 235 (vLLM);
+T=1 262-267 vs 190-193 and 212-213; 2 requests 458-467 vs 281-312; 4 requests 554-579 vs 500-538. Our greedy spread is one
+prompt: the 6 decode prompts include one that the engine runs past its natural end, where the text, and so the draft
+acceptance, varies by run. Over the other five, our medians are 357 / 361 / 362 tok/s vs 254 / 256 (SGLang) and 259 / 260
+(vLLM), about 1.4x both.
 
 How to read the columns:
 
@@ -49,6 +65,20 @@ Until 2026-11-22 the client divided all tokens by the time between the first and
 out special tokens at the end of an answer. Earlier decode numbers for this engine (for example 363 tok/s greedy and
 325 at temperature 1 for `--dense-fp8`) were too high and have been withdrawn. The concurrency numbers were best of
 two short runs.
+
+### Without the memory cap
+
+The 32 GB budget is this project's choice. On the whole 96 GB card, each engine with the same flags and no cap (vLLM at
+`--gpu-memory-utilization 0.9 --max-model-len 32768`, SGLang at `--mem-fraction-static 0.8`), two containers each:
+
+| | decode, greedy | decode, T=1 | 2 concurrent | 4 concurrent | TTFT 1k | TTFT 4k | TTFT 8k | TTFT 30k | GSM8K | peak GPU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| this engine (2) | 321 | 266 | 463 | 565 | 48 ms | 168 ms | 342 ms | 1424 ms | 0.837 | 28.5 GiB |
+| vLLM (2) | 235 | 213 | 320 | 390 | 60 ms | 184 ms | 348 ms | 1409 ms | - | 84.3 GiB |
+| SGLang (2) | 228 | 203 | 299 | 512 | 68 ms | 199 ms | 395 ms | 1585 ms | - | 78.8 GiB |
+
+Every column has the same order as with the cap, except TTFT at 30k, where vLLM is level with this engine (1408-1411 vs
+1422-1426 ms). SGLang's and vLLM's decode rates barely change; vLLM's 30k prefill now fits.
 
 **vLLM** could not hold a 32k context in this budget. It reported 7.3 GiB of KV cache left after weights, which is
 about 6.9k tokens, so it ran with `--max-model-len 6144`. Its 8k and 30k TTFT are therefore missing, and its

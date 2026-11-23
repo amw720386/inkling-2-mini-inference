@@ -2,7 +2,7 @@
 
 Each engine has one file per benchmark container (serve_ours.json, serve_ours-2.json, ...). A cell is the median over
 the containers that measured it. The README and docs/benchmarks.md tables are pasted from this output, so every number
-traces to a result file. `--spread` prints each container's value instead.
+traces to a result file. `--spread` prints each container's value instead, `--uncapped` the runs without the 32 GB memory cap.
 """
 
 import json
@@ -13,6 +13,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENGINES = [("ours", "this engine"), ("ours-bf16", "this engine, bf16"), ("vllm", "vLLM"), ("sglang", "SGLang")]
+UNCAPPED = [("ours-uncapped", "this engine"), ("vllm-uncapped", "vLLM"), ("sglang-uncapped", "SGLang")]
 METRICS = [  # (column, path, unit)
     ("decode, greedy", ("decode_greedy", "overall_tok_s"), ""), ("decode, T=1", ("decode_t1", "overall_tok_s"), ""),
     ("2 concurrent", ("concurrency", "2", "aggregate_tok_s"), ""),
@@ -25,7 +26,7 @@ METRICS = [  # (column, path, unit)
 
 def containers(engine):
     """Result files of one engine, one per container."""
-    pat = re.compile(rf"serve_{engine}(-\d+)?\.json$")
+    pat = re.compile(rf"serve_{engine}(-\d+)?\.json$")  # "ours" does not match "ours-uncapped"
     files = sorted(p for p in (ROOT / "results").glob("serve_*.json") if pat.match(p.name))
     return [r for r in (json.loads(p.read_text()) for p in files) if "error" not in r]
 
@@ -49,7 +50,7 @@ def main():
     spread = "--spread" in sys.argv
     print("| | " + " | ".join(m[0] for m in METRICS) + " |")
     print("|---|" + "---:|" * len(METRICS))
-    for engine, label in ENGINES:
+    for engine, label in (UNCAPPED if "--uncapped" in sys.argv else ENGINES):
         runs, cells = containers(engine), []
         for name, path, unit in METRICS:
             v = values(runs, path)

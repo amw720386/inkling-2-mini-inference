@@ -20,30 +20,34 @@ follows SGLang's implementation.
 
 **Ahead** (same GPU, same 32 GB budget, same client, medians over containers):
 
-- **Single-request decode:** greedy 344 vs 235 (vLLM) and 232 (SGLang) tok/s; temperature 1 264 vs 212 and 192.
-- **Concurrent requests:** 2 requests 464 vs 302 and 298 tok/s; 4 requests 571 vs 437 and 514.
-- **Time to first token:** 167 vs 184 and 223 ms at 4k tokens, and 1420 vs 1675 ms (SGLang) at 30k.
+- **Single-request decode:** greedy 322 vs 235 (vLLM) and 232 (SGLang) tok/s; temperature 1 267 vs 212 and 192.
+- **Concurrent requests:** 2 requests 463 vs 302 and 298 tok/s; 4 requests 576 vs 437 and 514.
+- **Time to first token:** 168 vs 184 and 223 ms at 4k tokens, and 1421 vs 1675 ms (SGLang) at 30k.
 - **More context in 32 GB:** four slots of 32k tokens each, and 256k on one card with an FP8 cache.
 
   <img src="docs/media/memory.gif" width="720" alt="The 32 GB budget: weights, four 32k KV slots, CUDA graphs; then one 256k FP8 slot">
 
-- **GSM8K** is level with both (0.835-0.840 vs 0.840 and 0.845, n = 200).
+- **GSM8K** is level with both (0.835-0.840 vs 0.840 and 0.845, n = 200; standard error about 0.026).
 
 **What to know:**
 
 - The server runs FP8 dense weights and FP4 prefill by default, which is not the bf16 checkpoint math.
   `--no-dense-fp8 --no-fp4-prefill` brings it back (decode 273 tok/s greedy, 4k TTFT 230 ms).
-- Single-request and 4-request rates depend on the prompts: over the six prompt rotations, individual 4-request
-  runs span 513-777 tok/s. Medians are over 2-5 containers per engine.
-- The engine should carry over well to an **RTX 5090**: it has the same GB202 chip, the engine fits in 32 GB, and
-  decode is limited mainly by memory bandwidth. We haven't measured it on one yet, and GeForce cards run bf16 with
-  fp32 accumulation at half rate, so the FP8 / FP4 paths matter more there.
+- Rates depend on the prompts: over the six prompt rotations, individual 4-request runs span 513-777 tok/s. Medians
+  are over 2-5 containers per engine. The table's 30k TTFT has no vLLM value because it doesn't fit in 32 GB.
+- **Without the 32 GB cap** (two containers each, every engine free to use the whole 96 GB card): decode greedy 321 vs
+  235 (vLLM) and 228 (SGLang), 4 requests 565 vs 390 and 512, 4k TTFT 168 vs 184 and 199 ms. At 30k tokens vLLM is level
+  with us (1409 vs 1424 ms); SGLang is at 1585 ms. ([docs/benchmarks.md](docs/benchmarks.md))
+- **RTX 5090:** it should work there. A 5090 has the same GB202 chip and 31.8 GiB of memory, and we tested the engine
+  with only 31.0 GiB left free on the card, from an empty kernel cache. The default and bf16 setups took four 31k-token
+  prompts at once and the 256k setup a 250k-token prompt, peaking at 28.6 GiB (`tests/gpu/fit_5090.py`). We haven't run it on a 5090, so its speed
+  there isn't measured: GeForce cards run bf16 prefill math at half the rate, so the FP8 / FP4 paths matter more.
 
 ![comparison](docs/img/comparison.png)
 
 | | decode, greedy | decode, T=1 | TTFT 4k | TTFT 8k | 2 / 4 concurrent | GSM8K |
 |---|---:|---:|---:|---:|---:|---:|
-| this engine | **344 tok/s** | **264 tok/s** | **167 ms** | **341 ms** | **464 / 571 tok/s** | 0.837 |
+| this engine | **322 tok/s** | **267 tok/s** | **168 ms** | **343 ms** | **463 / 576 tok/s** | 0.835 |
 | this engine, bf16 | 273 tok/s | 239 tok/s | 230 ms | 467 ms | 437 / 554 tok/s | 0.853 |
 | vLLM 0.34 nightly | 235 tok/s | 212 tok/s | 184 ms | does not fit | 302 / 437 tok/s | 0.840 |
 | SGLang (Inkling image) | 232 tok/s | 192 tok/s | 223 ms | 434 ms | 298 / 514 tok/s | 0.845 |
@@ -93,7 +97,7 @@ curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
 
 The defaults are 4 concurrent requests, 32k context, DSpark, FP8 dense weights, FP4 prefill and image input. Add
 `--no-dense-fp8 --no-fp4-prefill` for the bf16 checkpoint math, or `--kv-fp8 --max-ctx 262144 --slots 1` for long context ([serving.md](docs/serving.md)). The first start compiles
-and autotunes the Triton kernels, which takes a few minutes.
+the Triton kernels, which takes about a minute; the kernel settings ship with the engine.
 
 ## Reproduce
 
