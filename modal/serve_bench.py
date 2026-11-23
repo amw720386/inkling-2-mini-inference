@@ -109,6 +109,8 @@ def serve_and_bench(cmd, env, port, model_name, version_cmd=None, client_args=()
     ok = rc == 0 and os.path.exists(out)
     res = json.load(open(out)) if ok else {
         "error": cp.stderr[-3000:] + "\n--- server log ---\n" + open("/tmp/server.log").read()[-4000:]}
+    acc_lines = [x for x in open("/tmp/server.log", errors="replace").read().splitlines() if "accept" in x.lower()]
+    res["server_accept_log"] = acc_lines[-60:]  # e.g. SGLang's per-batch speculative accept length
     res["startup_s"] = round(startup)
     res["peak_gpu_mib"] = mem.peak
     if version_cmd:

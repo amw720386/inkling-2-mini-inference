@@ -41,7 +41,11 @@ names = sys.argv[3].split(",") if len(sys.argv) > 3 else ["default", "m=2", "m=4
 for name in names:
     sched.batched_spec = name != "plain"
     eng._pick_width_batched = (lambda reqs, m=int(name[2:]): m) if name.startswith("m=") else default_pick
-    rates = [run(rep) for rep in range(2)]
+    if name.startswith("lead="):  # progress balancing lead (tokens), "lead=off" disables
+        eng.BALANCE_LEAD = None if name[5:] == "off" else int(name[5:])
+    if name.startswith("wide="):  # threshold of mean recent acceptance for width 8 on a 2-request batch
+        eng.WIDE_PAIR_ACCEPT = float(name[5:])
+    rates = [run(rep) for rep in range(int(sys.argv[4]) if len(sys.argv) > 4 else 2)]
     print(f"k={k} {name:8s}: {' / '.join(f'{r:.0f}' for r in rates)} tok/s | batched_spec rounds "
           f"{sched.counters['batched_spec'][0]} batched {sched.counters['batched'][0]}", flush=True)
     sched.counters = {kk: ([0, 0.0] if kk != "batch_sizes" else {}) for kk in sched.counters}

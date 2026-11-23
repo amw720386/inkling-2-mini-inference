@@ -65,10 +65,11 @@ def http(rep):
 
 http(0)
 direct(0)
-modes = [("http_one", http, False), ("http_all", http, True), ("direct", direct, True)]
+modes = [("http_tok", http, False), ("http_coal", http, True), ("direct", direct, True)]
 for rep in range(reps):
     for name, fn, si in modes:
-        sched.prefill_all = si
+        import inkling_engine.server as srv_mod
+        srv_mod.COALESCE = si
         sched.counters = {kk: ([0, 0.0] if kk != "batch_sizes" else {}) for kk in sched.counters}
         t0 = time.perf_counter()
         r = fn(rep)

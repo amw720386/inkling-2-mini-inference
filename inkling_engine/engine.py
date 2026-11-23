@@ -317,7 +317,8 @@ class Engine:
     # for a measured-rate bandit, 477-514 for ragged per-request widths. Width 8 pays only for a pair of requests
     # that both accept well (2 requests, rep 0: 472 vs 447 for 4); in a 4-request run's tail it lost (517-526).
     BATCH_WIDTH = 4
-    WIDE_PAIR_ACCEPT = 1.5  # mean recent accepted drafts per round of a 2-request batch for width 8
+    WIDE_PAIR_ACCEPT = 1.0  # mean recent accepted drafts per round of a 2-request batch for width 8 (1.0: 482 vs
+    # 472 tok/s for 1.5 on prompts 0-1, level on the others)
 
     def _pick_width_batched(self, reqs) -> int:
         if len(reqs) == 2 and sum(getattr(r, "accept_ema", 0.0) for r in reqs) / 2 >= self.WIDE_PAIR_ACCEPT:

@@ -17,7 +17,7 @@ eng = em.Engine(sys.argv[1], max_ctx=32768, spec=True)
 items = json.load(open("/root/tests/reference/sglang_ref.json"))["items"]
 stop = {eng.cfg.eos_token_id}
 print("seeded costs", {m: round(c, 2) for m, c in eng.seeded_costs.items()})
-for g in (2.0, 1.5, 1.0, 0.7, 2.0, 1.0):
+for g in (1.5, 1.25, 1.75, 1.5, 2.0):
     em.SEEDED_GAMMA = g
     n, s, acc, rounds, widths = 0, 0.0, 0, 0, {}
     for i, it in enumerate(items[:6]):

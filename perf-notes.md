@@ -64,6 +64,17 @@ Same-day baseline (`bench_spec.py 256`, `fec93b5`): plain 173.9 tok/s, DSpark 32
   decode (510 vs 522, noise); a 0.2-0.5 ms GIL switch interval (no consistent change).
 - Server vs in-process, client in its own process (serve_gap.py): 2-4%.
 
+- Server streaming: tokens reach the event loop once per scheduler step (coalesced call_soon_threadsafe) and
+  each stream decodes once per batch of tokens. In-container A/B, client in its own process (serve_gap.py):
+  507/512/523 -> 523/524/532 tok/s at 4 requests (direct scheduler 538-541). The earlier cross-container
+  single run (510 vs 522) was noise.
+- 2-request batches take width 8 when their mean recent acceptance is >= 1.0 (482 vs 472 tok/s for 1.5).
+- Dropped (second pass): progress balancing (width 2 for requests far ahead, MoE rows masked): 513-524 vs
+  532-537; one prefill forward for several fresh short prompts: 491-496 vs 501-518; faster 1-warp router /
+  2-warp msg_up for T > 1: also changes short-prompt prefill, plain==sglang 19/64 instead of 9/64.
+- SGLang today (same container type): 4 requests 528.5 (runs 411.5 / 528.5), 2 requests 278; its log shows
+  accept length 2.7-2.9 at 4 running requests with 8 draft tokens.
+
 ## GSM8K check
 Greedy and deterministic: head gives 0.825 on 200 again. 600 questions: head 502/600 = 0.837, 0267d27
 (before the per-source prefill depth attention) 512/600 = 0.853; on questions 201-600 they differ by 3.

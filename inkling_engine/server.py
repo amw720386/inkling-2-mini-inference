@@ -101,6 +101,8 @@ class Splitter:
         return name, args
 
 
+COALESCE = True  # stream tokens to the event loop per scheduler step, not per token
+
 def normalize_messages(messages: list[dict]) -> list[dict]:
     """OpenAI clients send tool-call arguments as JSON strings; the template wants parsed objects."""
     out = []
@@ -338,12 +340,28 @@ def build_app(server: Server):
 
         out_tokens: list[int] = []
 
-        def on_token(t):  # scheduler thread -> event loop
-            if t is None:
-                loop.call_soon_threadsafe(q.put_nowait, (done, None))
-            else:
+        pending: list = []  # tokens from the scheduler thread not yet handed to the event loop
+        plock = threading.Lock()
+
+        def flush():  # event loop: one wake-up delivers every token of a speculative round
+            with plock:
+                items = pending[:]
+                pending.clear()
+            for it in items:
+                q.put_nowait(it)
+
+        def on_token(t):  # scheduler thread -> event loop (coalesced: the scheduler thread holds the GIL here)
+            item = (done, None) if t is None else t
+            if t is not None:
                 out_tokens.append(t)
-                loop.call_soon_threadsafe(q.put_nowait, t)
+            if not COALESCE:
+                loop.call_soon_threadsafe(q.put_nowait, item)
+                return
+            with plock:
+                pending.append(item)
+                first = len(pending) == 1
+            if first:
+                loop.call_soon_threadsafe(flush)
 
         max_new = int(body.get("max_tokens") or body.get("max_completion_tokens") or 2048)
         n_lp = requested_logprobs(body, chat)
@@ -373,8 +391,28 @@ def build_app(server: Server):
 
         try:
             while True:
-                item = await q.get()
-                if isinstance(item, tuple) and item and item[0] is done:
+                batch = [await q.get()]
+                while COALESCE and not q.empty():  # everything already delivered: decode once for all of it
+                    batch.append(q.get_nowait())
+                finished = any(isinstance(it, tuple) and it and it[0] is done for it in batch)
+                new = [it for it in batch if not (isinstance(it, tuple) and it and it[0] is done)]
+                if new and not stopped:
+                    toks.extend(new)
+                    text = tok.decode(toks, skip_special_tokens=not chat)  # chat: the splitter reads the markers
+                    end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
+                    if stops:
+                        lo = max(0, emitted - hold)
+                        hits = [i for i in (text.find(x, lo) for x in stops) if i >= 0]
+                        if hits:
+                            end, stopped = min(hits), True
+                            req.cancel.set()
+                        else:
+                            end = max(emitted, end - hold)
+                    delta, emitted = text[emitted:end], max(emitted, end)
+                    r, c, calls = feed(delta)
+                    if r or c or calls:
+                        yield ("delta", r, c, calls, new_lps())
+                if finished:
                     if req.error is not None:
                         raise req.error
                     tail = "" if stopped else text[emitted:]
@@ -382,23 +420,6 @@ def build_app(server: Server):
                     yield ("delta", r, c, calls, new_lps())
                     yield ("end", list(out_tokens), req.stats, rid, created, stopped)
                     return
-                if stopped:
-                    continue  # tokens generated before the cancel reached the scheduler
-                toks.append(item)
-                text = tok.decode(toks, skip_special_tokens=not chat)  # chat: the splitter reads the markers
-                end = len(text) - 1 if text.endswith("�") else len(text)  # incomplete UTF-8: wait
-                if stops:
-                    lo = max(0, emitted - hold)
-                    hits = [i for i in (text.find(x, lo) for x in stops) if i >= 0]
-                    if hits:
-                        end, stopped = min(hits), True
-                        req.cancel.set()
-                    else:
-                        end = max(emitted, end - hold)
-                delta, emitted = text[emitted:end], max(emitted, end)
-                r, c, calls = feed(delta)
-                if r or c or calls:
-                    yield ("delta", r, c, calls, new_lps())
         finally:
             if not req.done.is_set():  # the client went away (generator closed): stop generating
                 req.cancel.set()
