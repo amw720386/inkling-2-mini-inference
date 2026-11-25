@@ -34,6 +34,8 @@ the same client and container type, two containers each (medians; `tools/results
 | vLLM (2) | 210 | 203 | 327 | 435 | 303 | 404 | 184 ms | 1409 ms |
 | vLLM, optimized flags (2) | 212 | 207 | 331 | 441 | 295 | 417 | 193 ms | 1486 ms |
 
+<img src="img/comparison.svg" alt="This engine, vLLM and SGLang on one RTX PRO 6000: decode at 1, 2 and 4 requests, random 1k/1k, first token at 4k and 30k">
+
 - **Prompts:** 24 MT-Bench first turns (`tools/build_heldout.py`, the first three of each category), chat rendering with thinking off,
   greedy unless noted, natural stopping (at most 512 tokens; 6 to 9 of the 24 answers reach it in every engine). Nothing in this repo was tuned on them. `k` requests in flight,
   a warm-up pass, then the median of three passes; the rate is all completion tokens over the wall time. Greedy passes repeat the same prompts, so a second
@@ -56,8 +58,6 @@ repeating sentence. The scheduler's batch widths and the 0.8x draft temperature 
 (`bench/experiments/sched_widths.py`, `bench_draft_temp.py`), so these numbers are in-sample for this engine; the MT-Bench table above is the one to quote.
 
 ## Same GPU, same client: this engine vs vLLM vs SGLang
-
-![comparison](img/comparison.png)
 
 | | decode, greedy | decode, T=1 | 2 concurrent | 4 concurrent | TTFT 1k | TTFT 4k | TTFT 8k | TTFT 30k | GSM8K | peak GPU |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -185,7 +185,7 @@ modal run modal/download_weights.py                       # weights into a Modal
 modal run modal/serve_bench.py --engine ours --whole-card # no memory cap; also: sglang, vllm, vllm-fp8kv; --tag 2 for a second container
 modal run modal/serve_bench.py --engine ours              # 32 GB limit; also: ours-bf16, sglang, vllm
 python tools/results_table.py --whole-card                # the first table; without the flag, the 32 GB one
-python tools/plot_comparison.py                           # docs/img/comparison.png
+python tools/plot_comparison.py                           # docs/img/comparison.svg
 modal run modal/engine_app.py::parity --args "bench_spec.py 256"
 ```
 
