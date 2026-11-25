@@ -2,9 +2,9 @@
 # Re-render every video, GIF and diagram in docs/media from the sources in docs/media/src.
 #
 #   docs/media/src/render.sh            # everything
-#   docs/media/src/render.sh video      # hero video only (both aspect ratios)
+#   docs/media/src/render.sh video      # hero video only (both aspect ratios) and its poster
 #   docs/media/src/render.sh gifs       # README GIFs only
-#   docs/media/src/render.sh diagrams   # SVG diagrams only
+#   docs/media/src/render.sh diagrams   # SVG diagrams and the social preview card only
 #
 # Needs: node >= 18, ffmpeg, and Chrome or chrome-headless-shell (set CHROME=/path if render.js cannot find it).
 # Intermediate scene clips go to $WORK (default: a temp dir) and are deleted at the end.
@@ -58,14 +58,20 @@ if [ "$WHAT" = all ] || [ "$WHAT" = video ]; then
     join_clips "$OUT/inkling-launch-${size#*:}.mp4" "${clips[@]}"
     echo "wrote $OUT/inkling-launch-${size#*:}.mp4"
   done
+  # README poster: the end card's last frame under a play button (a triangle in a circle, drawn by poster.html)
+  ffmpeg -y -loglevel error -sseof -0.3 -i "$OUT/inkling-launch-16x9.mp4" -frames:v 1 "$SRC/scenes/poster-frame.png"
+  node "$SRC/render.js" "$SRC/scenes/poster.html" "$WORK/poster" --w 1280 --h 720 --stills 1
+  ffmpeg -y -loglevel error -i "$WORK/poster/t1.00.png" -q:v 3 "$OUT/inkling-launch-poster.jpg"
+  rm -f "$SRC/scenes/poster-frame.png"
+  echo "wrote $OUT/inkling-launch-poster.jpg"
 fi
 
 if [ "$WHAT" = all ] || [ "$WHAT" = gifs ]; then
   # page  render size  fps  out  dither   (render larger than 960 where labels need it; every GIF is scaled to 960 px wide;
   # flat 2D scenes use no dither, which keeps card fills clean; the 3D scenes need bayer for their gradients)
   while read -r page size fps name dither; do
-    node "$SRC/render.js" "$SRC/$page" "$WORK/$name.mp4" --w "${size%x*}" --h "${size#*x}" --fps "$fps" --crf 4
-    ffmpeg -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=${dither}:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
+    node "$SRC/render.js" "$SRC/$page" "$WORK/$name.mp4" --w "${size%x*}" --h "${size#*x}" --fps "$fps" --crf 4 < /dev/null
+    ffmpeg -nostdin -y -loglevel error -i "$WORK/$name.mp4" -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=${dither}:diff_mode=rectangle" -loop 0 "$OUT/$name.gif"
     echo "wrote $OUT/$name.gif ($(du -h "$OUT/$name.gif" | cut -f1))"
   done <<'GIFS'
 scenes/gif-race.html 960x540 15 race none
@@ -77,6 +83,8 @@ fi
 
 if [ "$WHAT" = all ] || [ "$WHAT" = diagrams ]; then
   (cd "$SRC" && node diagrams/export-svg.js "$OUT")
+  node "$SRC/render.js" "$SRC/scenes/social-preview.html" "$WORK/social" --w 1280 --h 640 --stills 1
+  cp "$WORK/social/t1.00.png" "$OUT/social-preview.png"
 fi
 
 [ "$OWN_WORK" = 1 ] && rm -rf -- "${WORK:?}"

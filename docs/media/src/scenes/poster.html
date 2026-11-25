@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- README poster of the launch video: its end card (poster-frame.png, written by render.sh) with a play button. -->
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  html, body { margin: 0; background: var(--bg); width: 1280px; height: 720px; overflow: hidden; }
+  img { display: block; width: 1280px; height: 720px; }
+  svg { position: absolute; right: 56px; bottom: 48px; }
+</style></head>
+<body>
+<img src="poster-frame.png">
+<svg width="88" height="88" viewBox="0 0 88 88"><circle cx="44" cy="44" r="42" fill="rgba(10,17,28,.85)" stroke="#60a5fa" stroke-width="2"/><path d="M36 28 L62 44 L36 60 Z" fill="#e8edf4"/></svg>
+<script>
+  window.SCENE = { duration: 1, ready: document.querySelector('img').decode() };
+  window.renderFrame = () => {};
+</script>
+</body></html>

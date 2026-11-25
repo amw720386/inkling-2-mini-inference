@@ -1,7 +1,7 @@
 """Run render.sh on a Modal CPU container and write the results to docs/media.
 
     modal run docs/media/src/render_modal.py                # everything
-    modal run docs/media/src/render_modal.py --what video   # video | gifs | diagrams
+    modal run docs/media/src/render_modal.py --what video   # video | gifs | diagrams, or a comma list: one container each
     modal run docs/media/src/render_modal.py --stills "scenes/endcard.html 3d/memory.html"  # PNG checks only
 """
 import io
@@ -40,7 +40,7 @@ def pack(directory):
     return buf.getvalue()
 
 
-@app.function(image=image, cpu=16, memory=32768, timeout=3600)
+@app.function(image=image, cpu=16, memory=32768, timeout=3 * 3600)
 def render(what: str, stills: str):
     sh("mkdir -p /root/media/src && cp -r /root/src/. /root/media/src/ && cd /root/media/src && npm ci --no-audit --no-fund")
     if stills:
@@ -53,14 +53,15 @@ def render(what: str, stills: str):
         return pack(out)
     sh(f"mkdir -p /root/out && cd /root/media/src && WORK=/root/work bash render.sh {what}")
     sh("mkdir -p /root/pack && find /root/media -maxdepth 1 -type f "
-       "\\( -name '*.mp4' -o -name '*.gif' -o -name '*.svg' -o -name '*.png' \\) -exec cp {} /root/pack/ \\;")
+       "\\( -name '*.mp4' -o -name '*.gif' -o -name '*.svg' -o -name '*.png' -o -name '*.jpg' \\) -exec cp {} /root/pack/ \\;")
     return pack("/root/pack")
 
 
 @app.local_entrypoint()
 def main(what: str = "all", stills: str = "", out: str = ""):
-    data = render.remote(what, stills)
     dest = pathlib.Path(out) if out else HERE.parent
-    with tarfile.open(fileobj=io.BytesIO(data)) as t:
-        t.extractall(dest, filter="data")
-    print("wrote", len(data), "bytes of files to", dest)
+    for call in [render.spawn(part, stills) for part in what.split(",")]:
+        data = call.get()
+        with tarfile.open(fileobj=io.BytesIO(data)) as t:
+            t.extractall(dest, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))  # older Pythons lack filters
+        print("wrote", len(data), "bytes of files to", dest)
