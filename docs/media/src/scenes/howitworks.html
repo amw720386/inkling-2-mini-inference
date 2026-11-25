@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- Scene 3, "how it works" (6.0 s). node render.js scenes/howitworks.html out.mp4 --w 1080 --h 1080 (or 1920x1080).
-     Facts: docs/architecture.md ("Decode step", "Speculative decoding (DSpark)"); caveat numbers: results/serve_sglang.json
-     and serve_ours.json, serve_vllm.json concurrency.4, medians over containers (docs/benchmarks.md). -->
+     Facts: docs/architecture.md ("Decode step", "Speculative decoding (DSpark)"); caveat numbers:
+     tools/results_table.py --whole-card, 4 MT-Bench requests, medians of two containers (vLLM with its optimized flags). -->
 <html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../theme.css">
 <style>
@@ -51,7 +51,7 @@
     <span><i style="background:var(--green)"></i>accepted</span>
     <span><i style="background:var(--red)"></i>rejected</span>
   </div>
-  <div id="caveat">Measured on an RTX PRO 6000 Blackwell. 4 concurrent requests: 576 tok/s vs 514 (SGLang) and 437 (vLLM).</div>
+  <div id="caveat">Measured on an RTX PRO 6000 Blackwell, 24 MT-Bench prompts. 4 requests in flight: 539 tok/s vs 466 (SGLang) and 441 (vLLM).</div>
 </div>
 <script src="../lib/scene.js"></script>
 <script>

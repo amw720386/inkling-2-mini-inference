@@ -29,21 +29,20 @@
 </style></head>
 <body>
 <div id="wrap">
-  <div id="kicker" class="label">Inkling-2-Mini · one 32 GB GPU</div>
+  <div id="kicker" class="label">Inkling-2-Mini · one RTX PRO 6000</div>
   <div id="head">Faster decode than SGLang and&nbsp;vLLM.</div>
   <div id="stats">
-    <div class="row us"><div class="l label">This engine</div><div class="track"><div class="bar" data-v="322.3"></div><div class="v">322<small>TOK/S</small></div></div></div>
-    <div class="row"><div class="l label">SGLang</div><div class="track"><div class="bar" data-v="232.1"></div><div class="v">232<small>TOK/S</small></div></div></div>
-    <div class="row"><div class="l label">vLLM</div><div class="track"><div class="bar" data-v="234.8"></div><div class="v">235<small>TOK/S</small></div></div></div>
+    <div class="row us"><div class="l label">This engine</div><div class="track"><div class="bar" data-v="294.6"></div><div class="v">295<small>TOK/S</small></div></div></div>
+    <div class="row"><div class="l label">vLLM</div><div class="track"><div class="bar" data-v="212.5"></div><div class="v">212<small>TOK/S</small></div></div></div>
+    <div class="row"><div class="l label">SGLang</div><div class="track"><div class="bar" data-v="193.6"></div><div class="v">194<small>TOK/S</small></div></div></div>
   </div>
-  <div id="ctx">One request, greedy: medians over containers, same GPU, same 32&nbsp;GB budget, server default. 4 requests: 576 vs 514 (SGLang) and 437 (vLLM)&nbsp;tok/s. Python and Triton.</div>
+  <div id="ctx">One greedy request, 24 MT-Bench prompts. Ours runs FP8 dense weights, theirs bf16. 4 requests: 539 vs 466 (SGLang) and 441 (vLLM)&nbsp;tok/s. Level with vLLM at&nbsp;2.</div>
   <div id="url">github.com/amw720386/inkling-2-mini-inference</div>
   <div id="magni" class="label">Made at Magni</div>
 </div>
 <script src="../lib/scene.js"></script>
 <script>
-  // Numbers: tools/results_table.py (medians over results/serve_*.json)
-  // (decode_greedy.overall_tok_s, concurrency.4).
+  // Numbers: tools/results_table.py --whole-card (heldout.greedy_k1 / greedy_k4 tok_s; vLLM with its optimized flags).
   if (S.wide) document.body.classList.add('wide');
   const els = ['#kicker', '#head', '#stats', '#ctx', '#url', '#magni'].map(S.$);
   // Kicker and headline are on screen from frame 0, so the joined video's cross-fade lands on them.
