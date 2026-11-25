@@ -1,14 +1,8 @@
 # ⚡ Inkling-2-Mini engine: a 26B looped MoE on one GPU
 
-### 🧠 26B looped MoE · 🔁 48 layer visits per token · 🚀 DSpark speculation · 💾 under 32 GB · 🔌 OpenAI-compatible
-
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Model: Inkling-2-Mini](https://img.shields.io/badge/model-Inkling--2--Mini-6f42c1.svg)](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 [![GPU: RTX PRO 6000 Blackwell](https://img.shields.io/badge/GPU-RTX%20PRO%206000%20Blackwell-76b900.svg)](docs/benchmarks.md)
-[![Decode vs SGLang](https://img.shields.io/badge/1%20request%20vs%20SGLang-1.5x-brightgreen.svg)](docs/benchmarks.md)
-[![Decode vs vLLM](https://img.shields.io/badge/1%20request%20vs%20vLLM-1.4x-brightgreen.svg)](docs/benchmarks.md)
-[![2 requests vs vLLM](https://img.shields.io/badge/2%20requests%20vs%20vLLM-level-yellow.svg)](docs/benchmarks.md)
-[![RTX 5090](https://img.shields.io/badge/RTX%205090-not%20run-lightgrey.svg)](#-what-was-measured-and-what-was-not)
 
 We're building a single-GPU inference engine for
 [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini), the 26B-parameter looped MoE from Thinking
