@@ -61,6 +61,7 @@
   .gif #kicker { font-size: 12px; margin-bottom: 8px; }
   .gif .card { height: calc(560px * var(--s)); }
   .gif .lab, .gif .status { font-size: calc(16px * var(--s)); }
+  .gif .lab { white-space: nowrap; letter-spacing: 0.08em; }
   .gif .meta { font-size: calc(16px * var(--s)); }
   .gif .stream { font-size: calc(21px * var(--s)); }
   .gif .foot { font-size: calc(16px * var(--s)); }

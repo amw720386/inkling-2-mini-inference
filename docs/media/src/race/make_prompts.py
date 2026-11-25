@@ -1,10 +1,11 @@
-"""Write race/race_prompts.json: the 6 decode-benchmark prompts and GSM8K test questions 0-39 as token ids,
+"""Write race/race_prompts.json: the 24 MT-Bench prompts of the published table and GSM8K test questions as token ids,
 at one or more thinking-effort levels.
 
     python docs/media/src/race/make_prompts.py --tokenizer /path/to/Inkling-2-Mini/tokenizer.json
 
 GSM8K questions use the same chat rendering as tests/reference/sglang_ref.json (thinking effort 0 by default; 0.7 is the template's "medium"), greedy, up to
-1024 new tokens, stopping at the model's end of turn. The decode prompts are the benchmark's (256 tokens, ignore_eos).
+1024 new tokens, stopping at the model's end of turn. The MT-Bench prompts are tests/reference/heldout_prompts.json
+(512 tokens, natural stopping, as in bench/serve_bench.py).
 """
 import argparse, json, pathlib, urllib.request
 
@@ -28,7 +29,8 @@ def main():
     items = ref["items"] if isinstance(ref, dict) else ref
     for it in items[:4]:  # the rendering reproduces the reference prompts' token ids
         assert tok.encode(it["rendered_prompt"], add_special_tokens=False).ids == it["input_ids"]
-    P = [] if a.no_bench else [{"id": f"bench{i}", "input_ids": x["input_ids"], "max_tokens": 256, "ignore_eos": True} for i, x in enumerate(items[:6])]
+    held = json.load(open(ROOT / "tests/reference/heldout_prompts.json"))["items"]
+    P = [] if a.no_bench else [{"id": f"mt{x['question_id']}", "input_ids": x["input_ids"], "max_tokens": 512, "ignore_eos": False} for x in held]
     with urllib.request.urlopen(GSM) as f:
         test = [json.loads(x) for x in f.read().decode().splitlines() if x.strip()]
     for eff in a.efforts.split(","):

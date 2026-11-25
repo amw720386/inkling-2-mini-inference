@@ -1,6 +1,6 @@
 """Pick the race question from the captured runs and write race/race_capture.json.
 
-    python docs/media/src/race/pick.py /tmp/race_raw_ours.json /tmp/race_raw_sglang.json /tmp/race_raw_vllm.json
+    python docs/media/src/race/pick.py /tmp/race_raw_ours.json /tmp/race_raw_sglang.json /tmp/race_raw_vllm-fp8kv.json
 
 Fixed rule, applied to the warm repeat (rep 1 of 0-1) of every engine, never per engine:
   1. the final answer is correct on all three engines;
@@ -8,22 +8,23 @@ Fixed rule, applied to the warm repeat (rep 1 of 0-1) of every engine, never per
   3. this engine's completion and the fastest baseline's (the ratio's denominator) have the same token count within
      5%, so the ratio measures speed, not length (greedy outputs differ between FP8 and bf16 engines, more so on long
      answers); the third card shows its own token count. --strict requires all three within 5%;
-  4. of those, the question whose speedup (fastest baseline / this engine) is closest to the 6-prompt decode average
-     (--target results: the published 6-prompt averages; --target capture: the same 6 prompts re-measured in this
-     capture), so the race shows a typical question, not the best one.
-Prints every candidate, so the choice can be checked.
+  4. of those, the question whose speedup (fastest baseline / this engine) is closest to the published one on the 24
+     MT-Bench prompts (one greedy request, medians, tools/results_table.py --whole-card), so the race shows a typical
+     question, not the best one.
+The rule was fixed before the whole-card capture (rule 3 is the form an earlier capture ended with). Prints every candidate, so the choice can be checked.
 """
 from __future__ import annotations
 
 import json
 import pathlib
 import re
+import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 REP = 1
 NAMES = {"ours": ("This engine", "This engine · default"),
-         "sglang": ("SGLang", "SGLang · DSpark"), "vllm": ("vLLM 0.34", "vLLM 0.34 · DSpark")}
+         "sglang": ("SGLang", "SGLang · DSpark"), "vllm-fp8kv": ("vLLM 0.34", "vLLM 0.34 · optimized flags")}
 
 
 def last_number(s):
@@ -59,35 +60,29 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("raw", nargs="+")
     ap.add_argument("--strict", action="store_true", help="all three engines within 5%% tokens")
-    ap.add_argument("--target", choices=["results", "capture"], default="results",
-                    help="ratio target: the published 6-prompt averages, or the same 6 prompts re-measured in this capture")
     a = ap.parse_args()
     raws = {}
     for p in a.raw:
         key = pathlib.Path(p).stem.replace("race_raw_", "")
-        raws[key] = json.load(open(p))
+        raws[key] = json.load(open(p, encoding="utf-8"))
         assert "error" not in raws[key], (key, raws[key].get("error", "")[-500:])
     ours_key = next(k for k in raws if k.startswith("ours"))
     base_keys = [k for k in raws if not k.startswith("ours")]
-    prompts = {p["id"]: p for p in json.load(open(HERE / "race_prompts.json"))}
-    res = {k: json.load(open(ROOT / f"results/serve_{k}.json"))["decode_greedy"]["overall_tok_s"] for k in raws}
+    prompts = {p["id"]: p for p in json.load(open(HERE / "race_prompts.json", encoding="utf-8"))}
+    sys.path.insert(0, str(ROOT / "tools"))
+    from results_table import WHOLE, median
+    res = {k: median(next(files for files, _ in WHOLE if files[0] == f"{k}-uncapped"), ("heldout", "greedy_k1", "tok_s")) for k in raws}
 
     runs = {k: {(r["id"], r["rep"]): r for r in v["runs"]} for k, v in raws.items()}
     bench = {}
-    for k in raws:  # the decode benchmark, re-measured by this capture (sanity check against results/)
-        per = []
-        for rep in (0, 1):
-            rs = [runs[k][(f"bench{i}", rep)] for i in range(6)]
-            tot_t = sum(r["usage"]["completion_tokens"] for r in rs)
-            tot_s = sum(r["t_end"] for r in rs)
-            per.append(round(tot_t / tot_s, 1))
-        bench[k] = {"overall_tok_s_reps": per, "results_file_tok_s": res[k]}
-        print(f"bench6 {k:9s} this capture {per} tok/s   results/ {res[k]}")
-    mean = {k: sum(v["overall_tok_s_reps"]) / 2 for k, v in bench.items()}
-    t_res = res[ours_key] / max(res[k] for k in base_keys)
-    t_cap = mean[ours_key] / max(mean[k] for k in base_keys)
-    target = t_cap if a.target == "capture" else t_res
-    print(f"ratio target: results {t_res:.3f}, this capture {t_cap:.3f}; using {a.target}")
+    held = [pid for pid in prompts if pid.startswith("mt")]
+    for k in raws:  # the published MT-Bench prompts, re-measured by this capture (sanity check against results/)
+        per = [round(sum(runs[k][(pid, rep)]["usage"]["completion_tokens"] for pid in held)
+                     / sum(runs[k][(pid, rep)]["t_end"] for pid in held), 1) for rep in (0, 1)]
+        bench[k] = {"tok_s_reps": per, "published_tok_s": res[k]}
+        print(f"mt-bench {k:11s} this capture {per} tok/s   published {res[k]}")
+    target = res[ours_key] / max(res[k] for k in base_keys)
+    print(f"ratio target (published): {target:.3f}; this capture {bench[ours_key]['tok_s_reps'][REP] / max(bench[k]['tok_s_reps'][REP] for k in base_keys):.3f}")
 
     cands = []
     for pid, p in prompts.items():
@@ -137,18 +132,14 @@ def main():
         r = runs[k][(best["id"], REP)]
         engines.append({"key": k, "name": NAMES[k][0], "label": NAMES[k][1], "chunks": r["chunks"],
                         "completion_tokens": r["usage"]["completion_tokens"], "finish_reason": r["finish_reason"],
-                        "answer_start": best["starts"][k], "gpu": raws[k].get("gpu"), "startup_s": raws[k].get("startup_s")})
+                        "answer_start": best["starts"][k], "gpu": raws[k].get("gpu"), "startup_s": raws[k].get("startup_s"), "version": raws[k].get("version")})
     out = {"question_id": best["id"], "question": p["question"], "label": p["label"], "prompt_ids": p["input_ids"],
            "headline": "One GSM8K question. Three engines.",
-           "layout": {"t0": 1.0, "duration": 6.8, "punch_delay": 0.2, "gif_duration": 6.8},
-           "rule": __doc__.split("\n\n", 2)[1].strip(), "rep": REP, "target_ratio": round(target, 3), "target_from": a.target, "strict": a.strict,
-           "selection_note": None if a.strict else (
-               "Rule 3 was relaxed to this form after the capture was seen: the strict form (all three engines within 5% "
-               "tokens) left only gsm108-e0.99 (1.39 s race, 1.18x). The pick's ratio can sit above the run's 6-prompt "
-               "ratio; the scene shows both."),
-           "engines": engines, "bench6": bench,
+           "layout": {"t0": 1.0, "punch_delay": 0.2, "hold": 3.3},
+           "rule": __doc__.split("\n\n", 2)[2].strip(), "rep": REP, "target_ratio": round(target, 3), "strict": a.strict,
+           "engines": engines, "mt_bench": bench,
            "candidates": [{k: v for k, v in c.items() if k != "starts"} for c in cands]}
-    (HERE / "race_capture.json").write_text(json.dumps(out, ensure_ascii=False))
+    (HERE / "race_capture.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     print("wrote", HERE / "race_capture.json")
 
 

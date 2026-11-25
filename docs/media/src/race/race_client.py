@@ -62,6 +62,8 @@ def main():
     if a.split:
         res["split"] = {}
         for p in P:
+            if "label" not in p:  # only the race candidates need the thinking/answer split
+                continue
             try:
                 res["split"][p["id"]] = split_tokens(a.base, a.model, p["input_ids"], p["max_tokens"])
             except Exception as e:  # noqa: BLE001
