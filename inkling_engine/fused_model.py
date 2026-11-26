@@ -19,6 +19,7 @@ from .batch import Batch
 from .cache import InklingCache
 from .config import InklingConfig
 from .fast import StepMeta, build_step_meta, pick_splits
+from .ops import cuda_ext as cx
 from .ops import fused_triton as fk
 from .ops import ref
 from .ops.attn_triton import inkling_attention, store_kv
@@ -153,6 +154,10 @@ class FusedModel:
         tl_ids = list(cfg.mtp.get("target_layer_ids", [5, 23, 41, 48]))
         self.tap_visits = {v: j for j, v in enumerate(tl_ids[:-1])}
         self.write_taps = False
+        # one-request fast path (CUDA kernels from inkling-2-mini-single-stream): used only when a step holds a
+        # single sequence of <= 8 tokens (decode, verify), so batched steps keep the Triton kernels.
+        # INKLING_SINGLE_USER=0 turns it off.
+        self.single_user = os.environ.get("INKLING_SINGLE_USER", "1") == "1" and dense_fp8
 
     # ---------------------------------------------------------------- metadata
     def step_meta(self, batch: Batch) -> StepMeta:
@@ -202,6 +207,8 @@ class FusedModel:
             vm, vk = batch.seqs[0].n, len(batch.seqs)
         direct_cache = meta.max_new <= DIRECT_CACHE_MAX_NEW
         pos = batch.positions
+        one = self.single_user and len(batch.seqs) == 1 and T <= 8  # stateless one-request kernels
+        one_state = one and (decode_state or verify)  # kernels that also update or record conv states
         blk = ws.blk[:, :T]
         ws.blk[0, :T] = ref.rms_norm(F.embedding(batch.input_ids, w.embed), w.embed_norm, c.rms_eps)
         if embed_feats is not None:  # image features replace the normed embeddings of their placeholders
@@ -238,8 +245,12 @@ class FusedModel:
                                ws.bank[:, :T], 2, w.loop_queries[layer - c.core_start].reshape(-1, c.hidden_size),
                                ws.msgs[:, :T], eps=c.rms_eps)
                 hs = ar.expand(3, -1, -1) if local else ar
-                fk.msg_gates(hs, ws.msgs[:3, :T], lw, 0, 3, ws.gbuf[:T], xn, c, norm_w=ex.qkv_norm,
-                             tmp=ws.tmp[:, :T])
+                if one:
+                    cx.msg_gates_cuda(hs, ws.msgs[:3, :T], lw, 0, 3, ws.gbuf[:T], xn, c.rms_eps, norm_w=ex.qkv_norm,
+                                      tmp=ws.tmp[:, :T])
+                else:
+                    fk.msg_gates(hs, ws.msgs[:3, :T], lw, 0, 3, ws.gbuf[:T], xn, c, norm_w=ex.qkv_norm,
+                                 tmp=ws.tmp[:, :T])
                 shared = False
             else:
                 fk.depth_attn(blk, nb + 1, w.attn_queries[layer], xn[:nq], norm_w=ex.qkv_norm[:nq])
@@ -250,7 +261,11 @@ class FusedModel:
             if T <= 32:  # decode / verify: one multi-input launch per visit
                 proj = ws.proj[:T, :ncols]
                 x3 = xn[:1].expand(3, -1, -1) if shared else xn
-                seg_gemv(x3, self.w_proj_dec[layer], proj, (self.seg_k, self.seg_v, self.seg_dk, self.seg_dv))
+                bounds = (self.seg_k, self.seg_v, self.seg_dk, self.seg_dv)
+                if one:
+                    cx.fp8_gemv(x3, self.w_proj_dec[layer], proj, bounds)
+                else:
+                    seg_gemv(x3, self.w_proj_dec[layer], proj, bounds)
             elif self.dense_fp8:  # prefill, FP8 tensor cores on the segments (row-scaled activations)
                 wb = self.w_proj_dec[layer]
                 proj = ws.proj_big(T, ncols)
@@ -304,25 +319,38 @@ class FusedModel:
             if not direct_cache:
                 store_kv(kk, vv, kc, vc, am, ring, meta.max_new)
             o = ws.o[:T]
-            dense_mm(attn, self._w(layer, 'wo', T), o)
+            if one:
+                cx.fp8_gemv(attn, self.fp8[(layer, "wo")], o)
+            else:
+                dense_mm(attn, self._w(layer, 'wo', T), o)
 
             # ---- residual + MLP input
             boundary = c.is_block_boundary(layer)
             ns = nb + 1 if boundary else nb
             resid = ws.resid[:T]
             mi_out = ws.mi[:T] if msgs else ws.x[:T]
-            fk.post_attn(o, lw.attn_conv_w, cache.attn_conv[vi], blk, ns, nb, resid, w.mlp_queries[layer],
-                         None if msgs else lw.mlp_norm, mi_out, meta.local, meta.tok_seq, c,
-                         boundary=boundary, decode_state=decode_state,
-                         cand=cache.cand['attn_conv'][vi] if verify else None)
+            if one_state:  # CUDA post-attention: one 8-CTA cluster per token; the slot is read on the device
+                cx.post_attn_cuda(o, lw.attn_conv_w, cache.attn_conv[vi],
+                                  cache.cand["attn_conv"][vi][0] if verify else None, blk, ns, nb, boundary, resid,
+                                  w.mlp_queries[layer], None if msgs else lw.mlp_norm, mi_out, c, T,
+                                  slot=meta.local.seq_slot)
+            else:
+                fk.post_attn(o, lw.attn_conv_w, cache.attn_conv[vi], blk, ns, nb, resid, w.mlp_queries[layer],
+                             None if msgs else lw.mlp_norm, mi_out, meta.local, meta.tok_seq, c,
+                             boundary=boundary, decode_state=decode_state,
+                             cand=cache.cand['attn_conv'][vi] if verify else None)
             if not decode_state:
                 self._conv_state(o, cache.attn_conv[vi], meta) if not verify else None
             if boundary:
                 nb += 1
             x = ws.x[:T]
             if msgs:
-                fk.msg_gates(ws.mi[:T][None], ws.msgs[3:4, :T], lw, 3, 1, ws.gbuf[:T], x[None], c,
-                             norm_w=lw.mlp_norm[None], tmp=ws.tmp[:1, :T])
+                if one:
+                    cx.msg_gates_cuda(ws.mi[:T][None], ws.msgs[3:4, :T], lw, 3, 1, ws.gbuf[:T], x[None], c.rms_eps,
+                                      norm_w=lw.mlp_norm[None], tmp=ws.tmp[:1, :T])
+                else:
+                    fk.msg_gates(ws.mi[:T][None], ws.msgs[3:4, :T], lw, 3, 1, ws.gbuf[:T], x[None], c,
+                                 norm_w=lw.mlp_norm[None], tmp=ws.tmp[:1, :T])
 
             # ---- MoE
             fk.route(x, ex.router_bf16, lw.router_bias, ws.rlog, ws.ids[:T], ws.wts[:T], c.top_k, c.route_scale,
