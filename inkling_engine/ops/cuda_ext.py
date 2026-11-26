@@ -1,6 +1,7 @@
 """CUDA C++ kernels of the one-request decode path (from inkling-2-mini-single-stream) (inkling_engine/csrc), compiled for sm_120a at first use.
 
-The build is cached in INKLING_EXT_DIR (default /cache/torch_ext/<hash of the sources>), so a container that
+The build is cached in INKLING_EXT_DIR (default /cache/torch_ext when /cache is writable, else
+~/.cache/inkling/torch_ext; one folder per hash of the sources), so a container that
 mounts the cache volume compiles once per source change.
 """
 
@@ -26,7 +27,9 @@ def mod():
 
         paths = [os.path.join(_SRC, s) for s in _SOURCES]
         h = hashlib.sha1(b"".join(open(p, "rb").read() for p in paths + [os.path.join(_SRC, x) for x in _HEADERS])).hexdigest()[:12]
-        build = os.path.join(os.environ.get("INKLING_EXT_DIR", "/cache/torch_ext"), h)
+        root = os.environ.get("INKLING_EXT_DIR") or (
+            "/cache/torch_ext" if os.access("/cache", os.W_OK) else os.path.expanduser("~/.cache/inkling/torch_ext"))
+        build = os.path.join(root, h)
         os.makedirs(build, exist_ok=True)
         _mod = load(name=f"inkling_ss_{h}", sources=paths, build_directory=build, verbose=False,
                     extra_cflags=["-O3"],

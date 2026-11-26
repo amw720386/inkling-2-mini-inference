@@ -14,7 +14,7 @@ server = ["fastapi", "uvicorn", "xgrammar"]
 packages = ["inkling_engine", "inkling_engine.ops"]
 
 [tool.setuptools.package-data]
-inkling_engine = ["data/*.bin"]
+inkling_engine = ["data/*.bin", "csrc/*.cpp", "csrc/*.cu", "csrc/*.cuh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

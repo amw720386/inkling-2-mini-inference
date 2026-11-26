@@ -158,6 +158,13 @@ class FusedModel:
         # single sequence of <= 8 tokens (decode, verify), so batched steps keep the Triton kernels.
         # INKLING_SINGLE_USER=0 turns it off.
         self.single_user = os.environ.get("INKLING_SINGLE_USER", "1") == "1" and dense_fp8
+        if self.single_user:
+            try:  # compiled at first use: needs nvcc; without it the Triton kernels serve every step
+                cx.mod()
+            except Exception as e:  # noqa: BLE001
+                import warnings
+                warnings.warn(f"one-request CUDA kernels unavailable ({type(e).__name__}: {e}); using Triton")
+                self.single_user = False
 
     # ---------------------------------------------------------------- metadata
     def step_meta(self, batch: Batch) -> StepMeta:
